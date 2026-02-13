@@ -1,11 +1,11 @@
 # enigma-reason
 
-**Situation Memory · Temporal Awareness · Signal Adapters · Reasoning Core**
+**Situation Memory · Temporal Awareness · Signal Adapters · Reasoning Core · LangGraph Orchestration**
 
 Receives structured or raw anomaly signals over WebSocket, validates/normalises
 them via pluggable adapters, organises them into long-lived Situations, derives
-deterministic confidence and trend observations, and exposes all metrics for
-observability.
+deterministic confidence and trend observations, and orchestrates multi-step
+hypothesis reasoning via LangGraph with Gemini Flash.
 
 ---
 
@@ -18,7 +18,9 @@ ML Sources ──ws──▶ /ws/raw-signal ──▶ AdapterRegistry ──▶ 
                                                               ReasoningEngine.evaluate()
                                                                         │
                                                               SituationReasoningSnapshot
-                                                              (confidence, trend, diversity)
+                                                                        │
+                                                              LangGraph Reasoning Loop
+                                                              (Gemini Flash hypotheses)
 ```
 
 ### Signal Flow (raw adapter path)
@@ -134,9 +136,15 @@ enigma_reason/
 │   ├── signal.py
 │   ├── situation.py
 │   ├── temporal.py
-│   └── reasoning.py                 # Trend enum + SituationReasoningSnapshot
+│   ├── reasoning.py                 # Trend enum + SituationReasoningSnapshot
+│   └── hypothesis.py                # Hypothesis + HypothesisStatus
 ├── core/
 │   └── reasoning_engine.py          # ReasoningEngine + ConfidenceWeights + TrendConfig
+├── graph/                               # Phase 5: LangGraph orchestration
+│   ├── state.py                     # ReasoningState TypedDict
+│   ├── nodes.py                     # 5 graph nodes (Gemini Flash for hypotheses)
+│   ├── builder.py                   # Graph topology construction
+│   └── runner.py                    # run_reasoning() public interface
 ├── store/
 │   ├── correlation.py
 │   └── situation_store.py           # + ReasoningSummary, reasoning_summary()
@@ -155,7 +163,8 @@ tests/
 ├── test_store.py
 ├── test_temporal.py
 ├── test_adapters.py
-└── test_reasoning.py                # 21 reasoning tests
+├── test_reasoning.py                # 21 reasoning tests
+└── test_graph.py                    # 27 LangGraph tests
 ```
 
 ---
@@ -183,6 +192,12 @@ tests/
 | `ENIGMA_TREND_RATE_RISE_FACTOR` | `1.5` | Rate rise threshold for escalation |
 | `ENIGMA_TREND_RATE_FALL_FACTOR` | `2.0` | Rate fall threshold for deescalation |
 | `ENIGMA_TREND_RECENT_COUNT` | `3` | Recent intervals for trend comparison |
+| `ENIGMA_GRAPH_MAX_ITERATIONS` | `3` | Max reasoning loop iterations |
+| `ENIGMA_GRAPH_CONVERGENCE_THRESHOLD` | `0.8` | Convergence score to exit loop |
+| `ENIGMA_GEMINI_MODEL` | `gemini-2.0-flash` | Gemini model for hypothesis generation |
+| `ENIGMA_GEMINI_TEMPERATURE` | `0.2` | LLM temperature |
+| `ENIGMA_GEMINI_MAX_OUTPUT_TOKENS` | `1024` | Max LLM output tokens |
+| `GOOGLE_API_KEY` | — | Gemini API key (required for Phase 5) |
 
 ---
 

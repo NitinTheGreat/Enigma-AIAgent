@@ -32,6 +32,15 @@ class Settings(BaseSettings):
     trend_rate_fall_factor: float = 2.0
     trend_recent_count: int = 3
 
+    # Phase 5: LangGraph orchestration
+    graph_max_iterations: int = 3
+    graph_convergence_threshold: float = 0.8
+
+    # Phase 5: Gemini LLM
+    gemini_model: str = "gemini-2.0-flash"
+    gemini_temperature: float = 0.2
+    gemini_max_output_tokens: int = 1024
+
     model_config = {"env_prefix": "ENIGMA_"}
 
 

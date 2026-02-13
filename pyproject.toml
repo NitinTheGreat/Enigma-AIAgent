@@ -9,6 +9,9 @@ dependencies = [
     "pydantic>=2.6",
     "pydantic-settings>=2.1",
     "websockets>=12.0",
+    "langgraph>=0.2",
+    "langchain-core>=0.3",
+    "langchain-google-genai>=2.0",
 ]
 
 [project.optional-dependencies]
