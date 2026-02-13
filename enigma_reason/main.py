@@ -7,6 +7,7 @@ WebSocket transport and starts the FastAPI server.
 from __future__ import annotations
 
 import logging
+from datetime import timedelta
 
 from fastapi import FastAPI
 
@@ -23,7 +24,10 @@ logging.basicConfig(
 
 # ── State ────────────────────────────────────────────────────────────────────
 
-store = SituationStore()
+store = SituationStore(
+    ttl=timedelta(minutes=settings.situation_ttl_minutes),
+    dormancy_window=timedelta(minutes=settings.situation_dormancy_minutes),
+)
 
 # ── App ──────────────────────────────────────────────────────────────────────
 
@@ -46,4 +50,5 @@ async def health() -> dict:
         "status": "ok",
         "phase": 1,
         "active_situations": await store.active_count(),
+        "dormant_situations": await store.dormant_count(),
     }

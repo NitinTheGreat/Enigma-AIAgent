@@ -3,8 +3,10 @@
 Design notes:
     - An asyncio.Lock guards all mutations so concurrent WebSocket handlers
       never corrupt state.
-    - Situation lookup is keyed by (signal_type, entity) — two signals that
-      share the same type and entity are considered part of the same narrative.
+    - Correlation logic is injected via a CorrelationStrategy, defaulting to
+      (signal_type, entity) grouping.
+    - Situations follow a lifecycle: active → dormant → expired.
+    - Dormant situations are retained and reactivated on new evidence.
     - The store does NOT decide *what* a situation means.  It only tracks
       which signals belong together and when to forget them.
 """
@@ -17,24 +19,14 @@ from datetime import timedelta
 from uuid import UUID
 
 from enigma_reason.domain.signal import Signal
-from enigma_reason.domain.situation import Situation
+from enigma_reason.domain.situation import Situation, SituationLifecycle
+from enigma_reason.store.correlation import (
+    CorrelationKey,
+    CorrelationStrategy,
+    DefaultCorrelation,
+)
 
 logger = logging.getLogger(__name__)
-
-# Type alias for the composite key used to correlate signals into situations.
-_CorrelationKey = tuple[str, str | None]   # (signal_type, entity_str | None)
-
-
-def _correlation_key(signal: Signal) -> _CorrelationKey:
-    """Derive a deterministic grouping key from a signal.
-
-    Signals with the same (signal_type, entity) are placed in the same
-    situation.  If the signal has no entity, it gets its own situation per
-    signal_type with entity=None — effectively one bucket for "anonymous"
-    signals of that type.
-    """
-    entity_str = str(signal.entity) if signal.entity else None
-    return (signal.signal_type.value, entity_str)
 
 
 class SituationStore:
@@ -43,13 +35,26 @@ class SituationStore:
     Args:
         ttl: How long a situation may remain without new evidence before
              it is considered expired and eligible for removal.
+        dormancy_window: Inactivity period after which a situation is
+             considered dormant (but still retained).
+        correlation: Strategy for grouping signals into situations.
     """
 
-    def __init__(self, ttl: timedelta = timedelta(minutes=30)) -> None:
+    def __init__(
+        self,
+        ttl: timedelta = timedelta(minutes=30),
+        dormancy_window: timedelta = timedelta(minutes=10),
+        correlation: CorrelationStrategy | None = None,
+    ) -> None:
+        if dormancy_window >= ttl:
+            raise ValueError("dormancy_window must be shorter than ttl")
+
         self._ttl = ttl
+        self._dormancy_window = dormancy_window
+        self._correlation = correlation or DefaultCorrelation()
         self._lock = asyncio.Lock()
         self._situations: dict[UUID, Situation] = {}
-        self._key_index: dict[_CorrelationKey, UUID] = {}
+        self._key_index: dict[CorrelationKey, UUID] = {}
 
     # ── Public API ───────────────────────────────────────────────────────
 
@@ -57,14 +62,16 @@ class SituationStore:
         """Find-or-create a Situation for *signal*, attach evidence, return it.
 
         This is the single entry point used by the WebSocket handler.
+        Dormant situations are reactivated when new evidence arrives.
         """
         async with self._lock:
             situation = self._find_or_create(signal)
             situation.attach_evidence(signal)
             logger.debug(
-                "Ingested signal %s → situation %s (evidence=%d)",
+                "Ingested signal %s → situation %s (v=%d, evidence=%d)",
                 signal.signal_id,
                 situation.situation_id,
+                situation.version,
                 situation.evidence_count,
             )
             return situation
@@ -78,6 +85,7 @@ class SituationStore:
         """Remove all situations that have exceeded the TTL.
 
         Returns the IDs of expired situations for logging / diagnostics.
+        Dormant situations are NOT removed — only truly expired ones.
         """
         async with self._lock:
             expired_ids: list[UUID] = [
@@ -95,11 +103,20 @@ class SituationStore:
         async with self._lock:
             return len(self._situations)
 
+    async def dormant_count(self) -> int:
+        """Count situations currently in dormant lifecycle state."""
+        async with self._lock:
+            return sum(
+                1 for sit in self._situations.values()
+                if sit.lifecycle_state(self._dormancy_window, self._ttl)
+                == SituationLifecycle.DORMANT
+            )
+
     # ── Internals ────────────────────────────────────────────────────────
 
     def _find_or_create(self, signal: Signal) -> Situation:
         """Must be called while holding self._lock."""
-        key = _correlation_key(signal)
+        key = self._correlation.get_key(signal)
         sid = self._key_index.get(key)
 
         if sid and sid in self._situations:
@@ -108,6 +125,7 @@ class SituationStore:
             if existing.is_expired(self._ttl):
                 self._remove(sid)
             else:
+                # Reactivate dormant situations — new evidence wakes them up
                 return existing
 
         # Create a new situation
