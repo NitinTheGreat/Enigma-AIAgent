@@ -9,6 +9,7 @@ Design notes:
     - Dormant situations are retained and reactivated on new evidence.
     - The store does NOT decide *what* a situation means.  It only tracks
       which signals belong together and when to forget them.
+    - Phase 2: temporal_summary() exposes aggregate temporal observations.
 """
 
 from __future__ import annotations
@@ -29,6 +30,48 @@ from enigma_reason.store.correlation import (
 logger = logging.getLogger(__name__)
 
 
+class TemporalSummary:
+    """Aggregate temporal observations across all active situations.
+
+    This is an observability object, not a control mechanism.
+    """
+
+    __slots__ = (
+        "total_situations",
+        "active_situations",
+        "dormant_situations",
+        "bursting_situations",
+        "quiet_situations",
+        "max_event_rate",
+    )
+
+    def __init__(
+        self,
+        total_situations: int = 0,
+        active_situations: int = 0,
+        dormant_situations: int = 0,
+        bursting_situations: int = 0,
+        quiet_situations: int = 0,
+        max_event_rate: float = 0.0,
+    ) -> None:
+        self.total_situations = total_situations
+        self.active_situations = active_situations
+        self.dormant_situations = dormant_situations
+        self.bursting_situations = bursting_situations
+        self.quiet_situations = quiet_situations
+        self.max_event_rate = max_event_rate
+
+    def to_dict(self) -> dict:
+        return {
+            "total_situations": self.total_situations,
+            "active_situations": self.active_situations,
+            "dormant_situations": self.dormant_situations,
+            "bursting_situations": self.bursting_situations,
+            "quiet_situations": self.quiet_situations,
+            "max_event_rate": round(self.max_event_rate, 4),
+        }
+
+
 class SituationStore:
     """Async-safe, in-memory store for active Situations.
 
@@ -38,6 +81,9 @@ class SituationStore:
         dormancy_window: Inactivity period after which a situation is
              considered dormant (but still retained).
         correlation: Strategy for grouping signals into situations.
+        burst_factor: Multiplier for burst detection threshold.
+        burst_recent_count: Number of recent intervals to evaluate for bursts.
+        quiet_window: Duration of inactivity that qualifies as "quiet".
     """
 
     def __init__(
@@ -45,6 +91,9 @@ class SituationStore:
         ttl: timedelta = timedelta(minutes=30),
         dormancy_window: timedelta = timedelta(minutes=10),
         correlation: CorrelationStrategy | None = None,
+        burst_factor: float = 3.0,
+        burst_recent_count: int = 3,
+        quiet_window: timedelta = timedelta(minutes=5),
     ) -> None:
         if dormancy_window >= ttl:
             raise ValueError("dormancy_window must be shorter than ttl")
@@ -52,6 +101,9 @@ class SituationStore:
         self._ttl = ttl
         self._dormancy_window = dormancy_window
         self._correlation = correlation or DefaultCorrelation()
+        self._burst_factor = burst_factor
+        self._burst_recent_count = burst_recent_count
+        self._quiet_window = quiet_window
         self._lock = asyncio.Lock()
         self._situations: dict[UUID, Situation] = {}
         self._key_index: dict[CorrelationKey, UUID] = {}
@@ -110,6 +162,46 @@ class SituationStore:
                 1 for sit in self._situations.values()
                 if sit.lifecycle_state(self._dormancy_window, self._ttl)
                 == SituationLifecycle.DORMANT
+            )
+
+    # ── Temporal Observations (Phase 2) ──────────────────────────────────
+
+    async def temporal_summary(self) -> TemporalSummary:
+        """Aggregate temporal observations across all situations.
+
+        This is observability, not control.  It mutates nothing.
+        """
+        async with self._lock:
+            total = len(self._situations)
+            active = 0
+            dormant = 0
+            bursting = 0
+            quiet = 0
+            max_rate = 0.0
+
+            for sit in self._situations.values():
+                state = sit.lifecycle_state(self._dormancy_window, self._ttl)
+                if state == SituationLifecycle.ACTIVE:
+                    active += 1
+                elif state == SituationLifecycle.DORMANT:
+                    dormant += 1
+
+                if sit.is_bursting(self._burst_factor, self._burst_recent_count):
+                    bursting += 1
+                if sit.is_quiet(self._quiet_window):
+                    quiet += 1
+
+                rate = sit.event_rate
+                if rate > max_rate:
+                    max_rate = rate
+
+            return TemporalSummary(
+                total_situations=total,
+                active_situations=active,
+                dormant_situations=dormant,
+                bursting_situations=bursting,
+                quiet_situations=quiet,
+                max_event_rate=max_rate,
             )
 
     # ── Internals ────────────────────────────────────────────────────────

@@ -1,4 +1,4 @@
-"""enigma-reason — Phase 1: Situation Memory & Signal Grounding.
+"""enigma-reason — Situation Memory & Signal Grounding + Temporal Awareness.
 
 This is the application entry point.  It wires the SituationStore to the
 WebSocket transport and starts the FastAPI server.
@@ -27,14 +27,17 @@ logging.basicConfig(
 store = SituationStore(
     ttl=timedelta(minutes=settings.situation_ttl_minutes),
     dormancy_window=timedelta(minutes=settings.situation_dormancy_minutes),
+    burst_factor=settings.burst_factor,
+    burst_recent_count=settings.burst_recent_count,
+    quiet_window=timedelta(minutes=settings.quiet_window_minutes),
 )
 
 # ── App ──────────────────────────────────────────────────────────────────────
 
 app = FastAPI(
     title=settings.app_name,
-    description="Phase 1 — Situation Memory & Signal Grounding",
-    version="0.1.0",
+    description="Situation Memory & Signal Grounding + Temporal Awareness",
+    version="0.2.0",
 )
 
 # ── Routes ───────────────────────────────────────────────────────────────────
@@ -46,9 +49,13 @@ app.include_router(create_signal_router(store))
 
 @app.get("/health")
 async def health() -> dict:
+    ts = await store.temporal_summary()
     return {
         "status": "ok",
-        "phase": 1,
-        "active_situations": await store.active_count(),
-        "dormant_situations": await store.dormant_count(),
+        "phase": 2,
+        "active_situations": ts.active_situations,
+        "dormant_situations": ts.dormant_situations,
+        "bursting_situations": ts.bursting_situations,
+        "quiet_situations": ts.quiet_situations,
+        "max_event_rate": ts.max_event_rate,
     }

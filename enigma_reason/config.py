@@ -12,6 +12,11 @@ class Settings(BaseSettings):
     situation_ttl_minutes: int = 30
     situation_dormancy_minutes: int = 10
 
+    # Phase 2: Temporal awareness
+    burst_factor: float = 3.0
+    burst_recent_count: int = 3
+    quiet_window_minutes: int = 5
+
     model_config = {"env_prefix": "ENIGMA_"}
 
 

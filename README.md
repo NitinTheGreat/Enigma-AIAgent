@@ -1,39 +1,52 @@
 # enigma-reason
 
-**Phase 1 — Situation Memory & Signal Grounding**
+**Situation Memory & Signal Grounding + Temporal Awareness**
 
-Receives structured anomaly signals over WebSocket, validates them, and organises
-them into long-lived Situations (evidence containers with lifecycle-aware expiry).
+Receives structured anomaly signals over WebSocket, validates them, organises
+them into long-lived Situations, and exposes temporal observations about
+evidence arrival patterns.
 
 ---
 
 ## Architecture
 
 ```
-ML Service ──ws──▶ /ws/signal ──▶ SituationStore ──▶ Situation(evidence[])
+ML Service ──ws──▶ /ws/signal ──▶ SituationStore ──▶ Situation(evidence[], temporal metrics)
 ```
 
 ### Signal Flow
 
 1. ML service connects to `/ws/signal` via WebSocket
 2. Each JSON payload is validated into an immutable `Signal` model
-3. The `SituationStore` groups signals using a pluggable `CorrelationStrategy` (default: `signal_type + entity`)
+3. The `SituationStore` groups signals using a pluggable `CorrelationStrategy`
 4. Evidence is attached to the matched (or newly created) `Situation`
-5. Ack is returned: `{ status, situation_id, evidence_count }`
+5. Temporal metrics update automatically on each attach
+6. Ack is returned: `{ status, situation_id, evidence_count }`
 
 ### Situation Lifecycle
 
 ```
-active ──(no evidence for dormancy window)──▶ dormant ──(no evidence for TTL)──▶ expired (removed)
-   ▲                                              │
-   └──────── (new evidence arrives) ◀─────────────┘
+active ──(dormancy window)──▶ dormant ──(TTL)──▶ expired (removed)
+   ▲                              │
+   └──── new evidence ◀───────────┘
 ```
 
-- **Active**: receiving evidence recently
-- **Dormant**: no evidence within `ENIGMA_SITUATION_DORMANCY_MINUTES` (default 10), still retained
-- **Expired**: no evidence within `ENIGMA_SITUATION_TTL_MINUTES` (default 30), eligible for removal
+### Temporal Metrics (Phase 2)
 
-Dormant situations reactivate when new evidence arrives.
+Each situation exposes read-only temporal observations:
+
+| Property | Description |
+|---|---|
+| `first_seen_at` | Timestamp of earliest evidence |
+| `last_seen_at` | Timestamp of most recent evidence |
+| `active_duration` | Seconds between first and last event |
+| `event_intervals` | Time gaps between consecutive events |
+| `event_rate` | Events per minute over active duration |
+| `is_bursting()` | True if recent events arrive faster than historical average |
+| `is_quiet()` | True if no events within configurable quiet window |
+| `temporal_snapshot()` | Immutable `SituationTemporalSnapshot` for downstream consumption |
+
+These are **observations, not conclusions** — no risk scores, no alerts.
 
 ---
 
@@ -64,18 +77,18 @@ Ingests structured anomaly signals from the ML detection service.
 { "status": "accepted", "situation_id": "uuid", "evidence_count": 3 }
 ```
 
-**Validation errors** return:
-
-```json
-{ "status": "error", "detail": [...] }
-```
-
 ### `GET /health`
 
-Returns system status:
-
 ```json
-{ "status": "ok", "phase": 1, "active_situations": 5, "dormant_situations": 2 }
+{
+  "status": "ok",
+  "phase": 2,
+  "active_situations": 5,
+  "dormant_situations": 2,
+  "bursting_situations": 1,
+  "quiet_situations": 3,
+  "max_event_rate": 12.5
+}
 ```
 
 ---
@@ -86,33 +99,27 @@ Returns system status:
 enigma_reason/
 ├── main.py                          # FastAPI entry point
 ├── config.py                        # Env-based settings (ENIGMA_ prefix)
-├── api/                             # WebSocket transport endpoints
-│   └── ws_signal.py
-├── domain/                          # Canonical models: Signal, Situation, enums
-│   ├── enums.py
-│   ├── signal.py
-│   └── situation.py
-├── store/                           # In-memory situation state management
+├── api/
+│   └── ws_signal.py                 # WebSocket transport
+├── domain/
+│   ├── enums.py                     # Signal types, entity kinds
+│   ├── signal.py                    # Canonical immutable Signal model
+│   ├── situation.py                 # Situation with lifecycle + temporal metrics
+│   └── temporal.py                  # SituationTemporalSnapshot (frozen Pydantic)
+├── store/
 │   ├── correlation.py               # Pluggable correlation strategy
-│   └── situation_store.py
-├── foundation/                      # Utilities: clock, ID generation
-│   ├── clock.py
-│   └── identifiers.py
-├── adapters/                        # Signal normalization (reserved, not wired)
-│   └── base.py
+│   └── situation_store.py           # In-memory store + TemporalSummary
+├── foundation/
+│   ├── clock.py                     # Patchable UTC clock
+│   └── identifiers.py              # UUID generation
+├── adapters/
+│   └── base.py                      # Abstract SignalAdapter (reserved)
 tests/
-├── test_signal.py
-├── test_situation.py
-└── test_store.py
+├── test_signal.py                   # Signal validation tests
+├── test_situation.py                # Situation lifecycle tests
+├── test_store.py                    # Store ingestion + expiry tests
+└── test_temporal.py                 # Temporal metrics, burst, quiet, snapshot tests
 ```
-
-| Folder | Purpose |
-|---|---|
-| `api/` | WebSocket transport — validates at boundary, delegates to store |
-| `domain/` | Canonical models: Signal (immutable contract), Situation (evidence container) |
-| `store/` | In-memory state with async locking, TTL expiry, pluggable correlation |
-| `foundation/` | Clock and ID generation — single patchable source of truth |
-| `adapters/` | Reserved for signal normalization adapters (not integrated yet) |
 
 ---
 
@@ -123,8 +130,11 @@ tests/
 | `ENIGMA_APP_NAME` | `enigma-reason` | Application name |
 | `ENIGMA_DEBUG` | `false` | Debug mode |
 | `ENIGMA_LOG_LEVEL` | `INFO` | Logging level |
-| `ENIGMA_SITUATION_TTL_MINUTES` | `30` | Time before expired situations are removed |
-| `ENIGMA_SITUATION_DORMANCY_MINUTES` | `10` | Time before inactive situations go dormant |
+| `ENIGMA_SITUATION_TTL_MINUTES` | `30` | TTL before expired situations are removed |
+| `ENIGMA_SITUATION_DORMANCY_MINUTES` | `10` | Inactivity before dormant state |
+| `ENIGMA_BURST_FACTOR` | `3.0` | How much faster than average = burst |
+| `ENIGMA_BURST_RECENT_COUNT` | `3` | Recent intervals to evaluate for burst |
+| `ENIGMA_QUIET_WINDOW_MINUTES` | `5` | Inactivity duration that qualifies as quiet |
 
 ---
 
