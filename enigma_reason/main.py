@@ -15,6 +15,7 @@ from enigma_reason.adapters.auth import AuthAnomalyAdapter
 from enigma_reason.adapters.network import NetworkAnomalyAdapter
 from enigma_reason.adapters.registry import AdapterRegistry
 from enigma_reason.adapters.video import VideoDetectionAdapter
+from enigma_reason.api.analyze import create_analyze_router
 from enigma_reason.api.ws_raw_signal import create_raw_signal_router
 from enigma_reason.api.ws_signal import create_signal_router
 from enigma_reason.config import settings
@@ -23,6 +24,7 @@ from enigma_reason.core.reasoning_engine import (
     ReasoningEngine,
     TrendConfig,
 )
+from enigma_reason.store.correlation import EntityCorrelation
 from enigma_reason.store.situation_store import SituationStore
 
 # ── Logging ──────────────────────────────────────────────────────────────────
@@ -60,6 +62,7 @@ reasoning_engine = ReasoningEngine(
 store = SituationStore(
     ttl=timedelta(minutes=settings.situation_ttl_minutes),
     dormancy_window=timedelta(minutes=settings.situation_dormancy_minutes),
+    correlation=EntityCorrelation(),
     burst_factor=settings.burst_factor,
     burst_recent_count=settings.burst_recent_count,
     quiet_window=timedelta(minutes=settings.quiet_window_minutes),
@@ -85,6 +88,13 @@ app = FastAPI(
 
 app.include_router(create_signal_router(store))
 app.include_router(create_raw_signal_router(store, registry))
+app.include_router(create_analyze_router(
+    store,
+    reasoning_engine,
+    burst_factor=settings.burst_factor,
+    burst_recent_count=settings.burst_recent_count,
+    quiet_window=timedelta(minutes=settings.quiet_window_minutes),
+))
 
 
 # ── Health ───────────────────────────────────────────────────────────────────
@@ -95,7 +105,7 @@ async def health() -> dict:
     rs = await store.reasoning_summary()
     return {
         "status": "ok",
-        "phase": 4,
+        "phase": 6.1,
         "active_situations": ts.active_situations,
         "dormant_situations": ts.dormant_situations,
         "bursting_situations": ts.bursting_situations,
