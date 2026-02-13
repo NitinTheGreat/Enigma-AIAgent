@@ -137,14 +137,18 @@ enigma_reason/
 │   ├── situation.py
 │   ├── temporal.py
 │   ├── reasoning.py                 # Trend enum + SituationReasoningSnapshot
-│   └── hypothesis.py                # Hypothesis + HypothesisStatus
+│   ├── hypothesis.py                # Hypothesis + HypothesisStatus
+│   └── explanation.py               # ExplanationSnapshot + ExplanationSection
 ├── core/
 │   └── reasoning_engine.py          # ReasoningEngine + ConfidenceWeights + TrendConfig
 ├── graph/                               # Phase 5: LangGraph orchestration
 │   ├── state.py                     # ReasoningState TypedDict
-│   ├── nodes.py                     # 5 graph nodes (Gemini Flash for hypotheses)
+│   ├── nodes.py                     # 7 graph nodes (incl. sanity gate + inertia)
 │   ├── builder.py                   # Graph topology construction
 │   └── runner.py                    # run_reasoning() public interface
+├── explain/                             # Phase 6: Explainability layer
+│   ├── builder.py                   # build_explanation() — deterministic
+│   └── formatter.py                 # ExplanationFormatter — optional LLM
 ├── store/
 │   ├── correlation.py
 │   └── situation_store.py           # + ReasoningSummary, reasoning_summary()
@@ -164,7 +168,8 @@ tests/
 ├── test_temporal.py
 ├── test_adapters.py
 ├── test_reasoning.py                # 21 reasoning tests
-└── test_graph.py                    # 27 LangGraph tests
+├── test_graph.py                    # 49 LangGraph + epistemic tests
+└── test_explanation.py              # 27 explainability tests
 ```
 
 ---
