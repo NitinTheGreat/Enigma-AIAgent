@@ -9,9 +9,7 @@ class Settings(BaseSettings):
     app_name: str = "enigma-reason"
     debug: bool = False
     log_level: str = "INFO"
-
-    # WebSocket origins allowed to connect
-    cors_origins: list[str] = ["*"]
+    situation_ttl_minutes: int = 30
 
     model_config = {"env_prefix": "ENIGMA_"}
 

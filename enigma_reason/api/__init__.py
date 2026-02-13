@@ -1,1 +1,1 @@
-# API layer: WebSocket endpoints, HTTP routes, dependencies
+# API layer: WebSocket transport endpoints

@@ -1,4 +1,8 @@
-"""enigma-reason: FastAPI application entry point."""
+"""enigma-reason — Phase 1: Situation Memory & Signal Grounding.
+
+This is the application entry point.  It wires the SituationStore to the
+WebSocket transport and starts the FastAPI server.
+"""
 
 from __future__ import annotations
 
@@ -6,8 +10,9 @@ import logging
 
 from fastapi import FastAPI
 
-from enigma_reason.api import ws_decisions, ws_signals
+from enigma_reason.api.ws_signal import create_signal_router
 from enigma_reason.config import settings
+from enigma_reason.store.situation_store import SituationStore
 
 # ── Logging ──────────────────────────────────────────────────────────────────
 
@@ -16,22 +21,29 @@ logging.basicConfig(
     format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
 )
 
+# ── State ────────────────────────────────────────────────────────────────────
+
+store = SituationStore()
+
 # ── App ──────────────────────────────────────────────────────────────────────
 
 app = FastAPI(
     title=settings.app_name,
-    description="Agentic reasoning layer for the Enigma distributed security system",
+    description="Phase 1 — Situation Memory & Signal Grounding",
     version="0.1.0",
 )
 
-# ── WebSocket Routes ─────────────────────────────────────────────────────────
+# ── Routes ───────────────────────────────────────────────────────────────────
 
-app.include_router(ws_signals.router, tags=["signals"])
-app.include_router(ws_decisions.router, tags=["decisions"])
+app.include_router(create_signal_router(store))
 
 
 # ── Health ───────────────────────────────────────────────────────────────────
 
 @app.get("/health")
-async def health() -> dict[str, str]:
-    return {"status": "ok"}
+async def health() -> dict:
+    return {
+        "status": "ok",
+        "phase": 1,
+        "active_situations": await store.active_count(),
+    }

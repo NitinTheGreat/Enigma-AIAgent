@@ -1,14 +1,13 @@
 [project]
 name = "enigma-reason"
 version = "0.1.0"
-description = "Agentic reasoning layer for the Enigma distributed security system"
+description = "Agentic reasoning layer — Phase 1: Situation Memory & Signal Grounding"
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.110",
     "uvicorn[standard]>=0.27",
     "pydantic>=2.6",
     "pydantic-settings>=2.1",
-    "langgraph>=0.0.40",
     "websockets>=12.0",
 ]
 
