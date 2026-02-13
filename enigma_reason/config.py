@@ -35,6 +35,7 @@ class Settings(BaseSettings):
     # Phase 5: LangGraph orchestration
     graph_max_iterations: int = 3
     graph_convergence_threshold: float = 0.8
+    graph_convergence_persistence: int = 2
 
     # Phase 5: Gemini LLM
     gemini_model: str = "gemini-2.0-flash"
