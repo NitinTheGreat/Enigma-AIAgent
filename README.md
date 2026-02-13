@@ -1,10 +1,11 @@
 # enigma-reason
 
-**Situation Memory · Temporal Awareness · Signal Adapters**
+**Situation Memory · Temporal Awareness · Signal Adapters · Reasoning Core**
 
 Receives structured or raw anomaly signals over WebSocket, validates/normalises
-them via pluggable adapters, organises them into long-lived Situations, and
-exposes temporal observations about evidence arrival patterns.
+them via pluggable adapters, organises them into long-lived Situations, derives
+deterministic confidence and trend observations, and exposes all metrics for
+observability.
 
 ---
 
@@ -13,6 +14,11 @@ exposes temporal observations about evidence arrival patterns.
 ```
 ML Sources ──ws──▶ /ws/raw-signal ──▶ AdapterRegistry ──▶ Signal ──▶ SituationStore
                    /ws/signal ─────────────────────────────────────▶ SituationStore
+                                                                        │
+                                                              ReasoningEngine.evaluate()
+                                                                        │
+                                                              SituationReasoningSnapshot
+                                                              (confidence, trend, diversity)
 ```
 
 ### Signal Flow (raw adapter path)
@@ -91,12 +97,17 @@ Ingests raw ML payloads. Routes through adapter registry.
 ```json
 {
   "status": "ok",
-  "phase": 3,
+  "phase": 4,
   "active_situations": 5,
   "dormant_situations": 2,
   "bursting_situations": 1,
   "quiet_situations": 3,
   "max_event_rate": 12.5,
+  "escalating_situations": 1,
+  "stable_situations": 3,
+  "deescalating_situations": 1,
+  "average_confidence": 0.42,
+  "max_confidence": 0.78,
   "adapters": [
     { "adapter_name": "network_anomaly", "accepted_count": 10, "rejected_count": 1 },
     { "adapter_name": "auth_anomaly", "accepted_count": 5, "rejected_count": 0 },
@@ -122,10 +133,13 @@ enigma_reason/
 │   ├── enums.py
 │   ├── signal.py
 │   ├── situation.py
-│   └── temporal.py
+│   ├── temporal.py
+│   └── reasoning.py                 # Trend enum + SituationReasoningSnapshot
+├── core/
+│   └── reasoning_engine.py          # ReasoningEngine + ConfidenceWeights + TrendConfig
 ├── store/
 │   ├── correlation.py
-│   └── situation_store.py
+│   └── situation_store.py           # + ReasoningSummary, reasoning_summary()
 ├── adapters/
 │   ├── base.py                      # SignalAdapter ABC
 │   ├── registry.py                  # AdapterRegistry + stats + errors
@@ -140,7 +154,8 @@ tests/
 ├── test_situation.py
 ├── test_store.py
 ├── test_temporal.py
-└── test_adapters.py
+├── test_adapters.py
+└── test_reasoning.py                # 21 reasoning tests
 ```
 
 ---
@@ -157,6 +172,17 @@ tests/
 | `ENIGMA_BURST_FACTOR` | `3.0` | Burst detection threshold multiplier |
 | `ENIGMA_BURST_RECENT_COUNT` | `3` | Recent intervals for burst check |
 | `ENIGMA_QUIET_WINDOW_MINUTES` | `5` | Inactivity for quiet detection |
+| `ENIGMA_CONFIDENCE_WEIGHT_EVIDENCE` | `0.25` | Confidence weight: evidence count |
+| `ENIGMA_CONFIDENCE_WEIGHT_RATE` | `0.15` | Confidence weight: event rate |
+| `ENIGMA_CONFIDENCE_WEIGHT_DIVERSITY` | `0.20` | Confidence weight: source diversity |
+| `ENIGMA_CONFIDENCE_WEIGHT_ANOMALY` | `0.30` | Confidence weight: anomaly score |
+| `ENIGMA_CONFIDENCE_WEIGHT_BURST` | `0.10` | Confidence weight: burst bonus |
+| `ENIGMA_CONFIDENCE_EVIDENCE_SATURATION` | `10.0` | Evidence count for max contribution |
+| `ENIGMA_CONFIDENCE_RATE_SATURATION` | `10.0` | Event rate for max contribution |
+| `ENIGMA_CONFIDENCE_DIVERSITY_SATURATION` | `3.0` | Source count for max contribution |
+| `ENIGMA_TREND_RATE_RISE_FACTOR` | `1.5` | Rate rise threshold for escalation |
+| `ENIGMA_TREND_RATE_FALL_FACTOR` | `2.0` | Rate fall threshold for deescalation |
+| `ENIGMA_TREND_RECENT_COUNT` | `3` | Recent intervals for trend comparison |
 
 ---
 

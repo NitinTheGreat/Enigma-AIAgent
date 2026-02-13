@@ -10,6 +10,7 @@ Design notes:
     - The store does NOT decide *what* a situation means.  It only tracks
       which signals belong together and when to forget them.
     - Phase 2: temporal_summary() exposes aggregate temporal observations.
+    - Phase 4: reasoning_summary() exposes aggregate reasoning observations.
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ from uuid import UUID
 
 from enigma_reason.domain.signal import Signal
 from enigma_reason.domain.situation import Situation, SituationLifecycle
+from enigma_reason.domain.reasoning import Trend
 from enigma_reason.store.correlation import (
     CorrelationKey,
     CorrelationStrategy,
@@ -72,6 +74,48 @@ class TemporalSummary:
         }
 
 
+class ReasoningSummary:
+    """Aggregate reasoning observations across all active situations.
+
+    Observability only — no control, no mutations.
+    """
+
+    __slots__ = (
+        "total_situations",
+        "escalating_situations",
+        "stable_situations",
+        "deescalating_situations",
+        "average_confidence",
+        "max_confidence",
+    )
+
+    def __init__(
+        self,
+        total_situations: int = 0,
+        escalating_situations: int = 0,
+        stable_situations: int = 0,
+        deescalating_situations: int = 0,
+        average_confidence: float = 0.0,
+        max_confidence: float = 0.0,
+    ) -> None:
+        self.total_situations = total_situations
+        self.escalating_situations = escalating_situations
+        self.stable_situations = stable_situations
+        self.deescalating_situations = deescalating_situations
+        self.average_confidence = average_confidence
+        self.max_confidence = max_confidence
+
+    def to_dict(self) -> dict:
+        return {
+            "total_situations": self.total_situations,
+            "escalating_situations": self.escalating_situations,
+            "stable_situations": self.stable_situations,
+            "deescalating_situations": self.deescalating_situations,
+            "average_confidence": round(self.average_confidence, 4),
+            "max_confidence": round(self.max_confidence, 4),
+        }
+
+
 class SituationStore:
     """Async-safe, in-memory store for active Situations.
 
@@ -84,6 +128,7 @@ class SituationStore:
         burst_factor: Multiplier for burst detection threshold.
         burst_recent_count: Number of recent intervals to evaluate for bursts.
         quiet_window: Duration of inactivity that qualifies as "quiet".
+        reasoning_engine: Optional ReasoningEngine for Phase 4 summaries.
     """
 
     def __init__(
@@ -94,6 +139,7 @@ class SituationStore:
         burst_factor: float = 3.0,
         burst_recent_count: int = 3,
         quiet_window: timedelta = timedelta(minutes=5),
+        reasoning_engine: object | None = None,
     ) -> None:
         if dormancy_window >= ttl:
             raise ValueError("dormancy_window must be shorter than ttl")
@@ -104,6 +150,7 @@ class SituationStore:
         self._burst_factor = burst_factor
         self._burst_recent_count = burst_recent_count
         self._quiet_window = quiet_window
+        self._reasoning_engine = reasoning_engine
         self._lock = asyncio.Lock()
         self._situations: dict[UUID, Situation] = {}
         self._key_index: dict[CorrelationKey, UUID] = {}
@@ -202,6 +249,48 @@ class SituationStore:
                 bursting_situations=bursting,
                 quiet_situations=quiet,
                 max_event_rate=max_rate,
+            )
+
+    # ── Reasoning Observations (Phase 4) ─────────────────────────────────
+
+    async def reasoning_summary(self) -> ReasoningSummary:
+        """Aggregate reasoning observations across all situations.
+
+        Requires a reasoning_engine to have been injected at construction.
+        Returns counts of escalating/stable/deescalating + average confidence.
+        """
+        if self._reasoning_engine is None:
+            return ReasoningSummary()
+
+        async with self._lock:
+            total = len(self._situations)
+            escalating = 0
+            stable = 0
+            deescalating = 0
+            confidence_sum = 0.0
+            max_confidence = 0.0
+
+            for sit in self._situations.values():
+                snapshot = self._reasoning_engine.evaluate(sit)
+                if snapshot.trend == Trend.ESCALATING:
+                    escalating += 1
+                elif snapshot.trend == Trend.DEESCALATING:
+                    deescalating += 1
+                else:
+                    stable += 1
+                confidence_sum += snapshot.confidence_level
+                if snapshot.confidence_level > max_confidence:
+                    max_confidence = snapshot.confidence_level
+
+            avg_confidence = confidence_sum / total if total > 0 else 0.0
+
+            return ReasoningSummary(
+                total_situations=total,
+                escalating_situations=escalating,
+                stable_situations=stable,
+                deescalating_situations=deescalating,
+                average_confidence=avg_confidence,
+                max_confidence=max_confidence,
             )
 
     # ── Internals ────────────────────────────────────────────────────────
