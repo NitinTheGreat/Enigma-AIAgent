@@ -1,27 +1,36 @@
 # enigma-reason
 
-**Situation Memory & Signal Grounding + Temporal Awareness**
+**Situation Memory · Temporal Awareness · Signal Adapters**
 
-Receives structured anomaly signals over WebSocket, validates them, organises
-them into long-lived Situations, and exposes temporal observations about
-evidence arrival patterns.
+Receives structured or raw anomaly signals over WebSocket, validates/normalises
+them via pluggable adapters, organises them into long-lived Situations, and
+exposes temporal observations about evidence arrival patterns.
 
 ---
 
 ## Architecture
 
 ```
-ML Service ──ws──▶ /ws/signal ──▶ SituationStore ──▶ Situation(evidence[], temporal metrics)
+ML Sources ──ws──▶ /ws/raw-signal ──▶ AdapterRegistry ──▶ Signal ──▶ SituationStore
+                   /ws/signal ─────────────────────────────────────▶ SituationStore
 ```
 
-### Signal Flow
+### Signal Flow (raw adapter path)
 
-1. ML service connects to `/ws/signal` via WebSocket
-2. Each JSON payload is validated into an immutable `Signal` model
-3. The `SituationStore` groups signals using a pluggable `CorrelationStrategy`
-4. Evidence is attached to the matched (or newly created) `Situation`
-5. Temporal metrics update automatically on each attach
-6. Ack is returned: `{ status, situation_id, evidence_count }`
+1. ML source connects to `/ws/raw-signal` via WebSocket
+2. Each JSON payload is routed through the `AdapterRegistry`
+3. The first adapter whose `can_handle()` returns True translates the payload
+4. A canonical, validated `Signal` is produced
+5. The Signal is ingested into the `SituationStore` (same as `/ws/signal` path)
+6. Ack is returned with adapter name, situation_id, evidence_count
+
+### Registered Adapters
+
+| Adapter | `source_type` | Maps to Signal |
+|---|---|---|
+| `NetworkAnomalyAdapter` | `network_anomaly` | src_ip → device entity, z_score → anomaly_score |
+| `AuthAnomalyAdapter` | `auth_anomaly` | username → user entity, failed_attempts → anomaly_score |
+| `VideoDetectionAdapter` | `video_detection` | camera_id → device entity, confidence + zone → anomaly_score |
 
 ### Situation Lifecycle
 
@@ -31,50 +40,50 @@ active ──(dormancy window)──▶ dormant ──(TTL)──▶ expired (re
    └──── new evidence ◀───────────┘
 ```
 
-### Temporal Metrics (Phase 2)
-
-Each situation exposes read-only temporal observations:
-
-| Property | Description |
-|---|---|
-| `first_seen_at` | Timestamp of earliest evidence |
-| `last_seen_at` | Timestamp of most recent evidence |
-| `active_duration` | Seconds between first and last event |
-| `event_intervals` | Time gaps between consecutive events |
-| `event_rate` | Events per minute over active duration |
-| `is_bursting()` | True if recent events arrive faster than historical average |
-| `is_quiet()` | True if no events within configurable quiet window |
-| `temporal_snapshot()` | Immutable `SituationTemporalSnapshot` for downstream consumption |
-
-These are **observations, not conclusions** — no risk scores, no alerts.
-
 ---
 
 ## Endpoints
 
-### `WebSocket /ws/signal`
+### `WebSocket /ws/signal` (canonical)
 
-Ingests structured anomaly signals from the ML detection service.
+Ingests pre-validated signals. No adapter layer.
 
-**Request** (JSON per message):
+### `WebSocket /ws/raw-signal` (adapter-driven)
+
+Ingests raw ML payloads. Routes through adapter registry.
+
+**Request** (example network anomaly):
 
 ```json
 {
-  "signal_id": "uuid",
-  "timestamp": "2026-02-13T14:00:00Z",
-  "signal_type": "intrusion",
-  "entity": { "kind": "user", "identifier": "alice" },
-  "anomaly_score": 0.85,
-  "confidence": 0.9,
-  "features": ["login_burst", "geo_anomaly"],
-  "source": "detector-alpha"
+  "source_type": "network_anomaly",
+  "src_ip": "10.0.0.42",
+  "dst_ip": "203.0.113.5",
+  "protocol": "tcp",
+  "bytes_sent": 1048576,
+  "bytes_received": 256,
+  "z_score": 4.2,
+  "detector_id": "net-detector-01",
+  "timestamp": "2026-02-13T14:00:00Z"
 }
 ```
 
-**Response** (JSON per message):
+**Success response**:
 
 ```json
-{ "status": "accepted", "situation_id": "uuid", "evidence_count": 3 }
+{ "status": "accepted", "adapter": "net-detector-01", "situation_id": "uuid", "evidence_count": 3 }
+```
+
+**No adapter match**:
+
+```json
+{ "status": "error", "reason": "no_adapter", "detail": "..." }
+```
+
+**Adaptation failure**:
+
+```json
+{ "status": "error", "reason": "adaptation_failed", "adapter": "network_anomaly", "detail": "..." }
 ```
 
 ### `GET /health`
@@ -82,12 +91,19 @@ Ingests structured anomaly signals from the ML detection service.
 ```json
 {
   "status": "ok",
-  "phase": 2,
+  "phase": 3,
   "active_situations": 5,
   "dormant_situations": 2,
   "bursting_situations": 1,
   "quiet_situations": 3,
-  "max_event_rate": 12.5
+  "max_event_rate": 12.5,
+  "adapters": [
+    { "adapter_name": "network_anomaly", "accepted_count": 10, "rejected_count": 1 },
+    { "adapter_name": "auth_anomaly", "accepted_count": 5, "rejected_count": 0 },
+    { "adapter_name": "video_detection", "accepted_count": 3, "rejected_count": 0 }
+  ],
+  "total_adapted": 18,
+  "total_rejected": 1
 }
 ```
 
@@ -97,28 +113,34 @@ Ingests structured anomaly signals from the ML detection service.
 
 ```
 enigma_reason/
-├── main.py                          # FastAPI entry point
-├── config.py                        # Env-based settings (ENIGMA_ prefix)
+├── main.py
+├── config.py
 ├── api/
-│   └── ws_signal.py                 # WebSocket transport
+│   ├── ws_signal.py                 # Canonical signal endpoint
+│   └── ws_raw_signal.py             # Adapter-driven raw signal endpoint
 ├── domain/
-│   ├── enums.py                     # Signal types, entity kinds
-│   ├── signal.py                    # Canonical immutable Signal model
-│   ├── situation.py                 # Situation with lifecycle + temporal metrics
-│   └── temporal.py                  # SituationTemporalSnapshot (frozen Pydantic)
+│   ├── enums.py
+│   ├── signal.py
+│   ├── situation.py
+│   └── temporal.py
 ├── store/
-│   ├── correlation.py               # Pluggable correlation strategy
-│   └── situation_store.py           # In-memory store + TemporalSummary
-├── foundation/
-│   ├── clock.py                     # Patchable UTC clock
-│   └── identifiers.py              # UUID generation
+│   ├── correlation.py
+│   └── situation_store.py
 ├── adapters/
-│   └── base.py                      # Abstract SignalAdapter (reserved)
+│   ├── base.py                      # SignalAdapter ABC
+│   ├── registry.py                  # AdapterRegistry + stats + errors
+│   ├── network.py                   # NetworkAnomalyAdapter
+│   ├── auth.py                      # AuthAnomalyAdapter
+│   └── video.py                     # VideoDetectionAdapter
+├── foundation/
+│   ├── clock.py
+│   └── identifiers.py
 tests/
-├── test_signal.py                   # Signal validation tests
-├── test_situation.py                # Situation lifecycle tests
-├── test_store.py                    # Store ingestion + expiry tests
-└── test_temporal.py                 # Temporal metrics, burst, quiet, snapshot tests
+├── test_signal.py
+├── test_situation.py
+├── test_store.py
+├── test_temporal.py
+└── test_adapters.py
 ```
 
 ---
@@ -130,11 +152,11 @@ tests/
 | `ENIGMA_APP_NAME` | `enigma-reason` | Application name |
 | `ENIGMA_DEBUG` | `false` | Debug mode |
 | `ENIGMA_LOG_LEVEL` | `INFO` | Logging level |
-| `ENIGMA_SITUATION_TTL_MINUTES` | `30` | TTL before expired situations are removed |
+| `ENIGMA_SITUATION_TTL_MINUTES` | `30` | TTL before expired situations removed |
 | `ENIGMA_SITUATION_DORMANCY_MINUTES` | `10` | Inactivity before dormant state |
-| `ENIGMA_BURST_FACTOR` | `3.0` | How much faster than average = burst |
-| `ENIGMA_BURST_RECENT_COUNT` | `3` | Recent intervals to evaluate for burst |
-| `ENIGMA_QUIET_WINDOW_MINUTES` | `5` | Inactivity duration that qualifies as quiet |
+| `ENIGMA_BURST_FACTOR` | `3.0` | Burst detection threshold multiplier |
+| `ENIGMA_BURST_RECENT_COUNT` | `3` | Recent intervals for burst check |
+| `ENIGMA_QUIET_WINDOW_MINUTES` | `5` | Inactivity for quiet detection |
 
 ---
 

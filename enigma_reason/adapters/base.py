@@ -1,13 +1,13 @@
 """Abstract base for signal adapters.
 
 Signal adapters normalise raw payloads from heterogeneous upstream
-sources into the canonical Signal model.  This module defines the
-interface only — concrete adapters will be added in future phases.
+sources into the canonical Signal model.
 
-Architectural intent:
-    Each upstream source (SIEM, IDS, custom ML pipeline) may produce
-    signals in a different schema.  An adapter translates that schema
-    into our canonical Signal without modifying the domain model.
+Architectural rules:
+    1. Adapters must NOT mutate the incoming payload dict.
+    2. adapt() must return a fully valid Signal or raise ValueError.
+    3. No adapter may call the SituationStore directly.
+    4. No ML logic lives inside an adapter — only field mapping.
 """
 
 from __future__ import annotations
@@ -19,16 +19,21 @@ from enigma_reason.domain.signal import Signal
 
 
 class SignalAdapter(ABC):
-    """Protocol for converting raw upstream payloads into canonical Signals."""
+    """Base class for converting raw upstream payloads into canonical Signals."""
 
     @abstractmethod
     def can_handle(self, raw: dict[str, Any]) -> bool:
-        """Return True if this adapter knows how to translate *raw*."""
+        """Return True if this adapter knows how to translate *raw*.
+
+        Must be a fast, non-destructive check (e.g. key presence).
+        """
         ...
 
     @abstractmethod
     def adapt(self, raw: dict[str, Any]) -> Signal:
         """Translate a raw payload dict into a validated Signal.
+
+        The input dict must NOT be mutated.
 
         Raises:
             ValueError: If the payload cannot be normalised.
