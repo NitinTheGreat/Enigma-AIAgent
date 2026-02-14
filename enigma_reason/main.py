@@ -14,6 +14,7 @@ from fastapi import FastAPI
 from enigma_reason.adapters.auth import AuthAnomalyAdapter
 from enigma_reason.adapters.network import NetworkAnomalyAdapter
 from enigma_reason.adapters.registry import AdapterRegistry
+from enigma_reason.adapters.unsw_threat import UNSWThreatAdapter
 from enigma_reason.adapters.video import VideoDetectionAdapter
 from enigma_reason.api.analyze import create_analyze_router
 from enigma_reason.api.ws_dashboard import DashboardManager, create_dashboard_router
@@ -73,6 +74,7 @@ store = SituationStore(
 # ── Adapter Registry ────────────────────────────────────────────────────────
 
 registry = AdapterRegistry()
+registry.register(UNSWThreatAdapter())
 registry.register(NetworkAnomalyAdapter())
 registry.register(AuthAnomalyAdapter())
 registry.register(VideoDetectionAdapter())
@@ -96,7 +98,7 @@ app = FastAPI(
 
 # ── Routes ───────────────────────────────────────────────────────────────────
 
-app.include_router(create_signal_router(store, dashboard_manager=dashboard))
+app.include_router(create_signal_router(store, dashboard_manager=dashboard, adapter_registry=registry))
 app.include_router(create_raw_signal_router(store, registry, dashboard_manager=dashboard))
 app.include_router(create_dashboard_router(dashboard))
 app.include_router(create_analyze_router(

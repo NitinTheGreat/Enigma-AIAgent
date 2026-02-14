@@ -4,6 +4,7 @@ Path: /ws/signal
 
 Accepts JSON matching the Signal schema, validates it at the boundary,
 routes it into the SituationStore, and returns a minimal acknowledgement.
+If strict validation fails, falls back to the adapter registry.
 If a DashboardManager is attached, triggers background analysis + push.
 
 No decisions.  No alerts.  No LLM calls on this path.
@@ -17,6 +18,7 @@ import logging
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from pydantic import ValidationError
 
+from enigma_reason.adapters.registry import AdapterRegistry
 from enigma_reason.domain.signal import Signal
 from enigma_reason.store.situation_store import SituationStore
 
@@ -24,12 +26,17 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 
-def create_signal_router(store: SituationStore, dashboard_manager=None) -> APIRouter:
+def create_signal_router(
+    store: SituationStore,
+    dashboard_manager=None,
+    adapter_registry: AdapterRegistry | None = None,
+) -> APIRouter:
     """Factory that wires the signal endpoint to a concrete SituationStore.
 
     Args:
         store: The SituationStore to ingest signals into.
         dashboard_manager: Optional DashboardManager to push analysis to FE.
+        adapter_registry: Optional AdapterRegistry for fallback conversion.
     """
 
     @router.websocket("/ws/signal")
@@ -42,12 +49,22 @@ def create_signal_router(store: SituationStore, dashboard_manager=None) -> APIRo
                 raw = await websocket.receive_json()
 
                 # ── Validate at the boundary ─────────────────────────────
+                signal = None
                 try:
                     signal = Signal.model_validate(raw)
-                except ValidationError as exc:
+                except ValidationError:
+                    # Strict validation failed — try adapter fallback
+                    if adapter_registry is not None:
+                        try:
+                            signal = adapter_registry.adapt(raw)
+                            logger.info("Adapted raw signal via registry")
+                        except Exception as adapt_exc:
+                            logger.debug("Adapter fallback failed: %s", adapt_exc)
+
+                if signal is None:
                     await websocket.send_json({
                         "status": "error",
-                        "detail": exc.errors(),
+                        "detail": "Signal validation failed and no adapter could handle the format",
                     })
                     continue
 
@@ -71,3 +88,4 @@ def create_signal_router(store: SituationStore, dashboard_manager=None) -> APIRo
             logger.info("Signal source disconnected")
 
     return router
+

@@ -12,6 +12,7 @@ from enum import Enum
 class SignalType(str, Enum):
     """Classification labels that the upstream ML service may emit."""
 
+    # Original types
     INTRUSION = "intrusion"
     ANOMALOUS_ACCESS = "anomalous_access"
     DATA_EXFILTRATION = "data_exfiltration"
@@ -19,6 +20,18 @@ class SignalType(str, Enum):
     LATERAL_MOVEMENT = "lateral_movement"
     POLICY_VIOLATION = "policy_violation"
     RECONNAISSANCE = "reconnaissance"
+
+    # UNSW-NB15 attack categories
+    BACKDOOR = "backdoor"
+    DOS = "dos"
+    EXPLOIT = "exploit"
+    FUZZERS = "fuzzers"
+    SHELLCODE = "shellcode"
+    WORMS = "worms"
+    GENERIC = "generic"
+    ANALYSIS = "analysis"
+    NORMAL = "normal"
+
     UNKNOWN = "unknown"
 
 
@@ -28,3 +41,5 @@ class EntityKind(str, Enum):
     USER = "user"
     DEVICE = "device"
     LOCATION = "location"
+    SERVICE = "service"
+

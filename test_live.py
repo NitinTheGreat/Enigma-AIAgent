@@ -1,4 +1,4 @@
-"""Live test: connect to /ws/dashboard, send signals, see analysis pushed in real time."""
+"""Live test: connect to /ws/dashboard, send signals in ML format, see analysis."""
 
 import asyncio
 import json
@@ -40,25 +40,6 @@ async def dashboard_listener(ready_event: asyncio.Event):
             for h in lg.get("hypotheses", []):
                 print(f"    [{h.get('status')}] {h.get('description')} (conf={h.get('confidence', 0):.2f})")
 
-            # Explanation sections
-            print("\n  --- EXPLANATION ---")
-            expl = data.get("explanation", {})
-            print(f"  Undecided: {expl.get('undecided')}")
-            for sec in expl.get("sections", []):
-                print(f"\n  [{sec['type']}] {sec['title']}")
-                for b in sec.get("bullets", []):
-                    print(f"    * {b}")
-                if sec.get("contribution_score") is not None:
-                    print(f"    Score: {sec['contribution_score']} ({sec['contribution_direction']})")
-                if sec.get("counterfactuals"):
-                    for cf in sec["counterfactuals"]:
-                        print(f"    > IF: {cf['missing_condition']}")
-                        print(f"      THEN: {cf['expected_effect']} ({cf['confidence_delta']:+.2f})")
-
-            te = expl.get("temporal_evolution")
-            if te:
-                print(f"\n  [TEMPORAL] trend={te['confidence_trend']}, velocity={te['velocity']}, stability={te['stability']}")
-
             # Human-readable
             print("\n  --- HUMAN READABLE ---")
             print(data.get("human_readable", "N/A"))
@@ -67,45 +48,83 @@ async def dashboard_listener(ready_event: asyncio.Event):
 
 
 async def send_signals():
-    """Send 3 test signals to /ws/signal."""
+    """Send test signals in the exact ML output format."""
     async with websockets.connect(SIGNAL_URI) as ws:
-        for sig_type, score, source, features in [
-            ("intrusion", 0.85, "network-ids", ["port_scan", "unusual_traffic"]),
-            ("privilege_escalation", 0.92, "auth-monitor", ["sudo_abuse", "new_admin"]),
-            ("data_exfiltration", 0.78, "dlp-sensor", ["large_outbound", "unusual_dest"]),
-        ]:
-            signal = {
-                "signal_id": str(uuid.uuid4()),
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "signal_type": sig_type,
-                "entity": {"kind": "device", "identifier": "server-prod-01"},
-                "anomaly_score": score,
-                "confidence": 0.75,
-                "features": features,
-                "source": source,
-            }
-            await ws.send(json.dumps(signal))
+        # These mimic the actual ML layer output
+        ml_signals = [
+            {
+                "input_that_i_gave_to_the_model": {
+                    "dur": 9e-06, "sbytes": 200.0, "dbytes": 0.0,
+                    "sloss": 0.0, "Sload": 540740.75, "Dload": 0.0,
+                },
+                "raw_output_from_model": [0.34, 0.42, 0.0002, 0.12, 0.02, 0.04, 0.03, 0.0002, 0.03, 0.002, 0.0002],
+                "output_from_model": "⚠️ THREAT DETECTED: backdoor (Confidence: 0.42)",
+                "inputs_for_xai_model": {
+                    "signal_id": str(uuid.uuid4()),
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "signal_type": "backdoor",
+                    "entity": {"device": "server-prod-01", "user": "network_admin", "location": "server_rack_1"},
+                    "anomaly_score": 0.42,
+                    "confidence": 0.42,
+                    "features": ["dur", "sbytes", "dbytes", "sloss", "Sload", "Dload"],
+                    "source": "unsw-threat-detector",
+                },
+            },
+            {
+                "input_that_i_gave_to_the_model": {
+                    "dur": 0.003, "sbytes": 50000.0, "dbytes": 100.0,
+                },
+                "raw_output_from_model": [0.05, 0.08, 0.02, 0.01, 0.02, 0.01, 0.75, 0.01, 0.02, 0.01, 0.02],
+                "output_from_model": "⚠️ THREAT DETECTED: shellcode (Confidence: 0.75)",
+                "inputs_for_xai_model": {
+                    "signal_id": str(uuid.uuid4()),
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "signal_type": "shellcode",
+                    "entity": {"device": "server-prod-01", "user": "root", "location": "server_rack_1"},
+                    "anomaly_score": 0.75,
+                    "confidence": 0.75,
+                    "features": ["dur", "sbytes", "dbytes", "smeansz", "dmeansz"],
+                    "source": "unsw-threat-detector",
+                },
+            },
+            {
+                "input_that_i_gave_to_the_model": {
+                    "dur": 0.0001, "sbytes": 800000.0, "dbytes": 50.0,
+                },
+                "raw_output_from_model": [0.02, 0.03, 0.85, 0.02, 0.01, 0.01, 0.02, 0.01, 0.01, 0.01, 0.01],
+                "output_from_model": "⚠️ THREAT DETECTED: exploit (Confidence: 0.85)",
+                "inputs_for_xai_model": {
+                    "signal_id": str(uuid.uuid4()),
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "signal_type": "exploit",
+                    "entity": {"device": "server-prod-01", "user": "www-data", "location": "dmz"},
+                    "anomaly_score": 0.85,
+                    "confidence": 0.85,
+                    "features": ["dur", "sbytes", "dbytes", "Sload", "ct_srv_src"],
+                    "source": "unsw-threat-detector",
+                },
+            },
+        ]
+
+        for ml_output in ml_signals:
+            xai = ml_output["inputs_for_xai_model"]
+            await ws.send(json.dumps(ml_output))
             resp = json.loads(await ws.recv())
-            print(f"[SIGNAL] Sent {sig_type} -> situation={resp['situation_id']}, evidence={resp['evidence_count']}")
-            await asyncio.sleep(0.5)  # Small delay between signals
+            print(f"[SIGNAL] Sent {xai['signal_type']} -> {resp}")
+            await asyncio.sleep(0.5)
 
 
 async def main():
     print("Connecting to dashboard WebSocket...")
     ready = asyncio.Event()
 
-    # Start dashboard listener in background
     listener_task = asyncio.create_task(dashboard_listener(ready))
-
-    # Wait for dashboard connection
     await ready.wait()
 
-    # Send signals
-    print("\nSending test signals...\n")
+    print("\nSending test signals (ML format)...\n")
     await send_signals()
 
-    # Wait for analyses to arrive (Gemini calls take a few seconds)
-    print("\nWaiting for analysis results (LangGraph + Gemini may take 10-30s)...\n")
+    print("\nWaiting for analysis results (Gemini takes 5-15s per signal)...\n")
     await asyncio.sleep(60)
 
     listener_task.cancel()

@@ -81,13 +81,10 @@ class Signal(BaseModel):
 
     @field_validator("timestamp")
     @classmethod
-    def timestamp_must_be_aware_and_not_future(cls, v: datetime) -> datetime:
+    def timestamp_must_be_aware(cls, v: datetime) -> datetime:
+        # Auto-attach UTC if the timestamp is naive (common in ML pipelines)
         if v.tzinfo is None:
-            raise ValueError("timestamp must be timezone-aware (UTC)")
-        now = utc_now()
-        # Allow 30 s of clock skew between services
-        if v > now.replace(microsecond=0) + __import__("datetime").timedelta(seconds=30):
-            raise ValueError(f"timestamp {v.isoformat()} is in the future (now={now.isoformat()})")
+            v = v.replace(tzinfo=__import__("datetime").timezone.utc)
         return v
 
     @field_validator("features")

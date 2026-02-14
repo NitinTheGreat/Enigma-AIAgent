@@ -43,15 +43,17 @@ class TestSignalValidation:
         with pytest.raises(Exception):
             Signal.model_validate(_valid_signal(confidence=-0.1))
 
-    def test_future_timestamp_rejected(self) -> None:
+    def test_future_timestamp_accepted(self) -> None:
+        """Future timestamps are accepted (ML may replay historical data)."""
         future = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
-        with pytest.raises(Exception):
-            Signal.model_validate(_valid_signal(timestamp=future))
+        signal = Signal.model_validate(_valid_signal(timestamp=future))
+        assert signal.timestamp.tzinfo is not None
 
-    def test_naive_timestamp_rejected(self) -> None:
+    def test_naive_timestamp_gets_utc(self) -> None:
+        """Naive timestamps get UTC auto-attached."""
         naive = datetime.now().isoformat()
-        with pytest.raises(Exception):
-            Signal.model_validate(_valid_signal(timestamp=naive))
+        signal = Signal.model_validate(_valid_signal(timestamp=naive))
+        assert signal.timestamp.tzinfo is not None
 
     def test_invalid_signal_type_rejected(self) -> None:
         with pytest.raises(Exception):
