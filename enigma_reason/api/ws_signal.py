@@ -4,12 +4,14 @@ Path: /ws/signal
 
 Accepts JSON matching the Signal schema, validates it at the boundary,
 routes it into the SituationStore, and returns a minimal acknowledgement.
+If a DashboardManager is attached, triggers background analysis + push.
 
-No decisions.  No alerts.  No LLM calls.
+No decisions.  No alerts.  No LLM calls on this path.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
@@ -22,10 +24,12 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 
-def create_signal_router(store: SituationStore) -> APIRouter:
+def create_signal_router(store: SituationStore, dashboard_manager=None) -> APIRouter:
     """Factory that wires the signal endpoint to a concrete SituationStore.
 
-    This avoids module-level singletons and makes the endpoint testable.
+    Args:
+        store: The SituationStore to ingest signals into.
+        dashboard_manager: Optional DashboardManager to push analysis to FE.
     """
 
     @router.websocket("/ws/signal")
@@ -56,6 +60,12 @@ def create_signal_router(store: SituationStore) -> APIRouter:
                     "situation_id": str(situation.situation_id),
                     "evidence_count": situation.evidence_count,
                 })
+
+                # ── Push to dashboard (background, non-blocking) ─────────
+                if dashboard_manager is not None:
+                    asyncio.create_task(
+                        dashboard_manager.on_situation_updated(situation)
+                    )
 
         except WebSocketDisconnect:
             logger.info("Signal source disconnected")

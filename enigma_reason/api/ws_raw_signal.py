@@ -11,6 +11,7 @@ This is additive — /ws/signal remains unchanged.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
@@ -28,6 +29,7 @@ logger = logging.getLogger(__name__)
 def create_raw_signal_router(
     store: SituationStore,
     registry: AdapterRegistry,
+    dashboard_manager=None,
 ) -> APIRouter:
     """Factory that wires the raw-signal endpoint to store + registry."""
 
@@ -71,6 +73,12 @@ def create_raw_signal_router(
                     "situation_id": str(situation.situation_id),
                     "evidence_count": situation.evidence_count,
                 })
+
+                # ── Push to dashboard (background, non-blocking) ─────────
+                if dashboard_manager is not None:
+                    asyncio.create_task(
+                        dashboard_manager.on_situation_updated(situation)
+                    )
 
         except WebSocketDisconnect:
             logger.info("Raw signal source disconnected")

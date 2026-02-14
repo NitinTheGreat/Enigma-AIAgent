@@ -16,6 +16,7 @@ from enigma_reason.adapters.network import NetworkAnomalyAdapter
 from enigma_reason.adapters.registry import AdapterRegistry
 from enigma_reason.adapters.video import VideoDetectionAdapter
 from enigma_reason.api.analyze import create_analyze_router
+from enigma_reason.api.ws_dashboard import DashboardManager, create_dashboard_router
 from enigma_reason.api.ws_raw_signal import create_raw_signal_router
 from enigma_reason.api.ws_signal import create_signal_router
 from enigma_reason.config import settings
@@ -76,18 +77,28 @@ registry.register(NetworkAnomalyAdapter())
 registry.register(AuthAnomalyAdapter())
 registry.register(VideoDetectionAdapter())
 
+# ── Dashboard Manager ────────────────────────────────────────────────────────
+
+dashboard = DashboardManager(
+    reasoning_engine=reasoning_engine,
+    burst_factor=settings.burst_factor,
+    burst_recent_count=settings.burst_recent_count,
+    quiet_window=timedelta(minutes=settings.quiet_window_minutes),
+)
+
 # ── App ──────────────────────────────────────────────────────────────────────
 
 app = FastAPI(
     title=settings.app_name,
     description="Situation Memory, Temporal Awareness, Adapters & Reasoning",
-    version="0.4.0",
+    version="0.7.0",
 )
 
 # ── Routes ───────────────────────────────────────────────────────────────────
 
-app.include_router(create_signal_router(store))
-app.include_router(create_raw_signal_router(store, registry))
+app.include_router(create_signal_router(store, dashboard_manager=dashboard))
+app.include_router(create_raw_signal_router(store, registry, dashboard_manager=dashboard))
+app.include_router(create_dashboard_router(dashboard))
 app.include_router(create_analyze_router(
     store,
     reasoning_engine,
