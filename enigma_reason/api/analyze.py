@@ -16,6 +16,7 @@ and a human-readable narrative — all in one JSON response.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import timedelta
 from typing import Any
@@ -84,7 +85,9 @@ def create_analyze_router(
         # ── Phase 5: LangGraph reasoning ──────────────────────────
         logger.info("Running LangGraph reasoning for situation %s", situation_id)
         try:
-            final_state = run_reasoning(situation, temporal, reasoning)
+            final_state = await asyncio.to_thread(
+                run_reasoning, situation, temporal, reasoning
+            )
         except Exception as exc:
             logger.error("LangGraph reasoning failed: %s", exc)
             # Fallback: build explanation from Phase 4 alone

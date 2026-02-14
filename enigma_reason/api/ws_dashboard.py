@@ -95,9 +95,12 @@ class DashboardManager:
         # Phase 4: Deterministic reasoning
         reasoning = self._reasoning_engine.evaluate(situation)
 
-        # Phase 5: LangGraph reasoning (potentially slow — runs Gemini)
+        # Phase 5: LangGraph reasoning (runs Gemini — offloaded to thread
+        # pool so we don't block the event loop and starve other WebSockets)
         try:
-            final_state = run_reasoning(situation, temporal, reasoning)
+            final_state = await asyncio.to_thread(
+                run_reasoning, situation, temporal, reasoning
+            )
         except Exception as exc:
             logger.warning("LangGraph reasoning failed, using fallback: %s", exc)
             final_state = {
