@@ -16,7 +16,7 @@ DASHBOARD_URI = f"ws://{EC2}:8000/ws/dashboard"
 async def dashboard_listener(ready_event: asyncio.Event):
     """Connect to /ws/dashboard and print whatever the AI layer pushes."""
     async with websockets.connect(DASHBOARD_URI) as ws:
-        print("[DASHBOARD] Connected — waiting for analysis pushes...\n")
+        print("[DASHBOARD] Connected â€” waiting for analysis pushes...\n")
         ready_event.set()
 
         while True:
@@ -58,13 +58,15 @@ async def send_signals():
                     "sloss": 0.0, "Sload": 540740.75, "Dload": 0.0,
                 },
                 "raw_output_from_model": [0.34, 0.42, 0.0002, 0.12, 0.02, 0.04, 0.03, 0.0002, 0.03, 0.002, 0.0002],
-                "output_from_model": "⚠️ THREAT DETECTED: backdoor (Confidence: 0.42)",
+                "output_from_model": "âš ï¸ THREAT DETECTED: backdoor (Confidence: 0.42)",
                 "inputs_for_xai_model": {
                     "signal_id": str(uuid.uuid4()),
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                     "signal_type": "backdoor",
                     "entity": {"device": "server-prod-01", "user": "network_admin", "location": "server_rack_1"},
-                    "anomaly_score": 0.42,
+                    "anomaly_score": 0.94,
+                    "predicted_class_confidence": 0.42,
+                    "predictive_entropy": 0.61,
                     "confidence": 0.42,
                     "features": ["dur", "sbytes", "dbytes", "sloss", "Sload", "Dload"],
                     "source": "unsw-threat-detector",
@@ -75,13 +77,15 @@ async def send_signals():
                     "dur": 0.003, "sbytes": 50000.0, "dbytes": 100.0,
                 },
                 "raw_output_from_model": [0.05, 0.08, 0.02, 0.01, 0.02, 0.01, 0.75, 0.01, 0.02, 0.01, 0.02],
-                "output_from_model": "⚠️ THREAT DETECTED: shellcode (Confidence: 0.75)",
+                "output_from_model": "âš ï¸ THREAT DETECTED: shellcode (Confidence: 0.75)",
                 "inputs_for_xai_model": {
                     "signal_id": str(uuid.uuid4()),
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                     "signal_type": "shellcode",
                     "entity": {"device": "server-prod-01", "user": "root", "location": "server_rack_1"},
-                    "anomaly_score": 0.75,
+                    "anomaly_score": 0.99,
+                    "predicted_class_confidence": 0.75,
+                    "predictive_entropy": 0.34,
                     "confidence": 0.75,
                     "features": ["dur", "sbytes", "dbytes", "smeansz", "dmeansz"],
                     "source": "unsw-threat-detector",
@@ -92,13 +96,15 @@ async def send_signals():
                     "dur": 0.0001, "sbytes": 800000.0, "dbytes": 50.0,
                 },
                 "raw_output_from_model": [0.02, 0.03, 0.85, 0.02, 0.01, 0.01, 0.02, 0.01, 0.01, 0.01, 0.01],
-                "output_from_model": "⚠️ THREAT DETECTED: exploit (Confidence: 0.85)",
+                "output_from_model": "âš ï¸ THREAT DETECTED: exploit (Confidence: 0.85)",
                 "inputs_for_xai_model": {
                     "signal_id": str(uuid.uuid4()),
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                     "signal_type": "exploit",
                     "entity": {"device": "server-prod-01", "user": "www-data", "location": "dmz"},
-                    "anomaly_score": 0.85,
+                    "anomaly_score": 0.98,
+                    "predicted_class_confidence": 0.85,
+                    "predictive_entropy": 0.22,
                     "confidence": 0.85,
                     "features": ["dur", "sbytes", "dbytes", "Sload", "ct_srv_src"],
                     "source": "unsw-threat-detector",

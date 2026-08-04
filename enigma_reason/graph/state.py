@@ -53,3 +53,6 @@ class ReasoningState(TypedDict, total=False):
     undecided_iterations: int
     last_confidence_shift: float
     convergence_persistence: int
+
+    # Level 2 belief inertia cap, seeded from settings.max_confidence_delta.
+    max_confidence_delta: float

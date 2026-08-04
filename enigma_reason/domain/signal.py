@@ -15,7 +15,6 @@ from uuid import UUID
 from pydantic import BaseModel, Field, field_validator
 
 from enigma_reason.domain.enums import EntityKind, SignalType
-from enigma_reason.foundation.clock import utc_now
 
 
 # ── Entity Reference ─────────────────────────────────────────────────────────
@@ -55,13 +54,38 @@ class Signal(BaseModel):
         ...,
         ge=0.0,
         le=1.0,
-        description="How anomalous the detector considers this event (0 = normal, 1 = extreme)",
+        description=(
+            "How anomalous the detector considers this event, defined as "
+            "1 - P(normal). 0 means the detector is sure the flow is benign, "
+            "1 means it is sure the flow is not. This is NOT the classifier's "
+            "confidence in its chosen label; see predicted_class_confidence."
+        ),
     )
     confidence: float = Field(
         ...,
         ge=0.0,
         le=1.0,
         description="Detector's confidence in its own classification (0 = guessing, 1 = certain)",
+    )
+    predicted_class_confidence: Optional[float] = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Maximum class probability, meaning how sure the detector is about "
+            "the label it chose. Carries no information about whether the flow "
+            "is benign, because a confidently benign flow scores high here too."
+        ),
+    )
+    predictive_entropy: Optional[float] = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Shannon entropy of the class distribution normalised by log of the "
+            "class count, so 0 is a one-hot prediction and 1 is uniform. A proxy "
+            "for detector uncertainty, reserved for Level 4 selective prediction."
+        ),
     )
     features: list[str] = Field(
         default_factory=list,
@@ -73,6 +97,21 @@ class Signal(BaseModel):
         min_length=1,
         max_length=256,
         description="Identifier of the detection pipeline or sensor",
+    )
+    abstained: bool = Field(
+        default=False,
+        description=(
+            "True when the sensor declined to assign a class because its "
+            "calibrated confidence fell below the validation-fitted threshold. "
+            "An abstained signal is still evidence that something occurred; it "
+            "is not a claim about what."
+        ),
+    )
+    calibrated_confidence: Optional[float] = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description="Temperature-scaled confidence that drove the abstention decision",
     )
 
     model_config = {"frozen": True}

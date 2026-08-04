@@ -4,22 +4,22 @@ version = "0.1.0"
 description = "Agentic reasoning layer — Phase 1: Situation Memory & Signal Grounding"
 requires-python = ">=3.11"
 dependencies = [
-    "fastapi>=0.110",
-    "uvicorn[standard]>=0.27",
-    "pydantic>=2.6",
-    "pydantic-settings>=2.1",
-    "websockets>=12.0",
-    "langgraph>=0.2",
-    "langchain-core>=0.3",
-    "langchain-google-genai>=2.0",
+    "fastapi>=0.128",
+    "uvicorn[standard]>=0.40",
+    "pydantic>=2.12",
+    "pydantic-settings>=2.12",
+    "websockets>=15.0",
+    "langgraph>=1.0",
+    "langchain-core>=1.2",
+    "langchain-google-genai>=4.2",
 ]
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=8.0",
-    "pytest-asyncio>=0.23",
-    "httpx>=0.27",
-    "ruff>=0.3",
+    "pytest>=9.0",
+    "pytest-asyncio>=1.3",
+    "httpx>=0.28",
+    "ruff>=0.15",
 ]
 
 [tool.ruff]

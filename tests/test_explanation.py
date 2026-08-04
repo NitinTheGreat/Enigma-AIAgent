@@ -20,7 +20,6 @@ Phase 6.1:
 
 from __future__ import annotations
 
-import json
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
@@ -30,12 +29,10 @@ import pytest
 
 from enigma_reason.domain.explanation import (
     ContributionDirection,
-    Counterfactual,
     ExplanationRole,
     ExplanationSection,
     ExplanationSnapshot,
     SectionType,
-    TemporalEvolution,
     filter_explanation_for_role,
 )
 from enigma_reason.domain.hypothesis import (

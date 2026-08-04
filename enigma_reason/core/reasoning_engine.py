@@ -32,11 +32,12 @@ Trend detection:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import timedelta
 
 from enigma_reason.domain.reasoning import SituationReasoningSnapshot, Trend
 from enigma_reason.domain.situation import Situation
+from enigma_reason.foundation.clock import ClockMode
 
 
 @dataclass(frozen=True)
@@ -85,12 +86,32 @@ class ReasoningEngine:
         burst_factor: float = 3.0,
         burst_recent_count: int = 3,
         quiet_window: timedelta = timedelta(minutes=5),
+        clock_mode: ClockMode | str = ClockMode.SEPARATED,
     ) -> None:
+        """
+        Args:
+            weights: Confidence formula weights and saturation points.
+            trend_config: Rate-change thresholds for trend detection.
+            burst_factor: Multiplier defining a burst.
+            burst_recent_count: Recent intervals compared for burst detection.
+            quiet_window: Inactivity duration that qualifies as quiet.
+            clock_mode: The time domain this engine expects situations to use.
+                The engine holds no clock of its own; every time-dependent read
+                is delegated to the Situation. This field exists so that a
+                mismatch between the engine and the situations it evaluates is
+                caught rather than silently producing the D1 defect again.
+        """
         self._weights = weights or ConfidenceWeights()
         self._trend_config = trend_config or TrendConfig()
         self._burst_factor = burst_factor
         self._burst_recent_count = burst_recent_count
         self._quiet_window = quiet_window
+        self._clock_mode = ClockMode(clock_mode)
+
+    @property
+    def clock_mode(self) -> ClockMode:
+        """Return the time domain this engine requires of its situations."""
+        return self._clock_mode
 
     # ── Public API ───────────────────────────────────────────────────────
 
@@ -99,7 +120,25 @@ class ReasoningEngine:
 
         Returns an immutable snapshot with confidence and trend derived
         deterministically from evidence and temporal facts.
+
+        Args:
+            situation: The situation to evaluate. Must have been constructed in
+                the same clock mode as this engine.
+
+        Returns:
+            An immutable SituationReasoningSnapshot.
+
+        Raises:
+            ValueError: If the situation evaluates time in a different domain
+                than this engine expects. Two components disagreeing about the
+                time domain is precisely the D1 defect.
         """
+        if situation.clock_mode is not self._clock_mode:
+            raise ValueError(
+                f"clock mode mismatch: engine is {self._clock_mode.value}, "
+                f"situation {situation.situation_id} is {situation.clock_mode.value}"
+            )
+
         evidence_count = situation.evidence_count
         event_rate = situation.event_rate
         burst = situation.is_bursting(self._burst_factor, self._burst_recent_count)
@@ -117,6 +156,8 @@ class ReasoningEngine:
 
         trend = self._detect_trend(situation, burst=burst, quiet=quiet)
 
+        abstained_count = self._abstained_count(situation)
+
         return SituationReasoningSnapshot(
             situation_id=str(situation.situation_id),
             evidence_count=evidence_count,
@@ -127,6 +168,10 @@ class ReasoningEngine:
             trend=trend,
             source_diversity=sources,
             mean_anomaly_score=round(mean_anomaly, 4),
+            abstained_evidence_count=abstained_count,
+            abstained_fraction=(
+                round(abstained_count / evidence_count, 4) if evidence_count else 0.0
+            ),
         )
 
     # ── Confidence ───────────────────────────────────────────────────────
@@ -208,6 +253,18 @@ class ReasoningEngine:
         if not situation.evidence:
             return 0
         return len({sig.source for sig in situation.evidence})
+
+    @staticmethod
+    def _abstained_count(situation: Situation) -> int:
+        """Count evidence items the sensor declined to classify.
+
+        Args:
+            situation: The situation being evaluated.
+
+        Returns:
+            How many signals carry the abstained flag.
+        """
+        return sum(1 for signal in situation.evidence if getattr(signal, "abstained", False))
 
     @staticmethod
     def _mean_anomaly_score(situation: Situation) -> float:

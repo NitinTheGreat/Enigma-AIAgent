@@ -1,11 +1,25 @@
-"""Application configuration loaded from environment variables."""
+"""
+Module: enigma_reason/config.py
+
+Application configuration loaded from environment variables.
+
+Every switch in the ABLATION section below is read by Level 9, which runs a
+2^4 factorial across the four epistemic control mechanisms. When a switch is
+disabled the mechanism must be absent from the reasoning path entirely, not
+weakened, so that a disabled configuration is behaviourally identical to one
+where the mechanism was never written.
+"""
 
 from __future__ import annotations
 
 from pydantic_settings import BaseSettings
 
+from enigma_reason.foundation.clock import ClockMode
+
 
 class Settings(BaseSettings):
+    """Environment-backed settings. All variables carry the ENIGMA_ prefix."""
+
     app_name: str = "enigma-reason"
     debug: bool = False
     log_level: str = "INFO"
@@ -41,6 +55,29 @@ class Settings(BaseSettings):
     gemini_model: str = "gemini-2.0-flash"
     gemini_temperature: float = 0.2
     gemini_max_output_tokens: int = 1024
+
+    # ── Level 2: clock domain ────────────────────────────────────────────
+    # ENIGMA_CLOCK_MODE. See foundation/clock.py and EVIDENCE.md section D1.
+    # "conflated" reproduces the original defect and exists for the Level 8
+    # experiment. It must never be the default.
+    clock_mode: ClockMode = ClockMode.SEPARATED
+
+    # ── Level 2: ablation switches ───────────────────────────────────────
+    # U: the permanent non-prunable UNKNOWN hypothesis.
+    unknown_hypothesis_enabled: bool = True
+    # S: the deterministic structural sanity gate.
+    sanity_gate_enabled: bool = True
+    # A: negative evidence decaying confidence faster than positive evidence.
+    asymmetric_decay_enabled: bool = True
+    # P: the sustained dominance requirement before convergence is permitted.
+    persistence_required: bool = True
+
+    # Belief inertia cap. 0.15 matches the largest single adjustment the
+    # evaluation node can apply in one pass, which is the 0.1 anomaly boost
+    # plus the 0.05 trend boost. A cap below that would suppress a legitimate
+    # single-pass update; a cap above it could never bind. Set to a very large
+    # number to disable the mechanism for ablation.
+    max_confidence_delta: float = 0.15
 
     model_config = {"env_prefix": "ENIGMA_"}
 

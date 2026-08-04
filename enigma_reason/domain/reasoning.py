@@ -42,5 +42,17 @@ class SituationReasoningSnapshot(BaseModel):
         ..., ge=0.0, le=1.0,
         description="Average anomaly score across all evidence",
     )
+    abstained_evidence_count: int = Field(
+        default=0,
+        description="Evidence items where the sensor declined to assign a class",
+    )
+    abstained_fraction: float = Field(
+        default=0.0, ge=0.0, le=1.0,
+        description=(
+            "Share of evidence the sensor abstained on. High values mean the "
+            "situation rests on detections the sensor itself would not stand "
+            "behind, which is a reason for the reasoner to remain undecided."
+        ),
+    )
 
     model_config = {"frozen": True}

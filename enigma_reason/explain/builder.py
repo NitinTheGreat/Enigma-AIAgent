@@ -33,7 +33,6 @@ from enigma_reason.domain.explanation import (
 from enigma_reason.domain.hypothesis import UNKNOWN_HYPOTHESIS_ID
 from enigma_reason.domain.reasoning import SituationReasoningSnapshot
 from enigma_reason.domain.temporal import SituationTemporalSnapshot
-from enigma_reason.graph.state import ReasoningState
 
 logger = logging.getLogger(__name__)
 

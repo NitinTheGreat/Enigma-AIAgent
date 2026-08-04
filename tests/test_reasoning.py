@@ -2,14 +2,13 @@
 
 Tests confidence computation, trend detection, reasoning engine output,
 store-level reasoning summary, and determinism.
-Uses clock patching via enigma_reason.domain.situation.utc_now.
+Uses clock patching via enigma_reason.foundation.clock.utc_now.
 """
 
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
-from uuid import uuid4
 
 import pytest
 
@@ -18,23 +17,23 @@ from enigma_reason.core.reasoning_engine import (
     ReasoningEngine,
     TrendConfig,
 )
-from enigma_reason.domain.enums import EntityKind, SignalType
 from enigma_reason.domain.reasoning import SituationReasoningSnapshot, Trend
 from enigma_reason.domain.signal import Signal
 from enigma_reason.domain.situation import Situation
+from enigma_reason.foundation.clock import ClockMode, ReplayClock
 from enigma_reason.store.situation_store import SituationStore
 
 from tests.test_signal import _valid_signal
 
 
-# ── Helpers ──────────────────────────────────────────────────────────────────
+# â”€â”€ Helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 _BASE = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
 
 
 def _patched_now(dt: datetime):
     """Freeze utc_now() at the situation module level."""
-    return patch("enigma_reason.domain.situation.utc_now", return_value=dt)
+    return patch("enigma_reason.foundation.clock.utc_now", return_value=dt)
 
 
 def _signal_at(ts: datetime, source: str = "src-a", score: float = 0.5, **kw) -> Signal:
@@ -64,7 +63,7 @@ def _default_engine(**overrides) -> ReasoningEngine:
     return ReasoningEngine(**overrides)
 
 
-# ── Confidence Tests ─────────────────────────────────────────────────────────
+# â”€â”€ Confidence Tests â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 
 class TestConfidenceComputation:
@@ -126,7 +125,7 @@ class TestConfidenceComputation:
         assert 0.0 <= snap.confidence_level <= 1.0
 
     def test_confidence_deterministic(self) -> None:
-        """Same inputs → same output, every time."""
+        """Same inputs â†’ same output, every time."""
         engine = _default_engine()
         ts = [_BASE + timedelta(seconds=i * 5) for i in range(5)]
         sit = _situation_with_signals(ts)
@@ -136,7 +135,7 @@ class TestConfidenceComputation:
         assert snap1.confidence_level == snap2.confidence_level
 
 
-# ── Trend Detection Tests ────────────────────────────────────────────────────
+# â”€â”€ Trend Detection Tests â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 
 class TestTrendDetection:
@@ -168,16 +167,30 @@ class TestTrendDetection:
         assert snap.burst_detected is True
 
     def test_quiet_triggers_deescalating(self) -> None:
+        """Quiet now arrives from event time advancing, not from host time.
+
+        Rewritten for Level 2. The original advanced the host clock, which only
+        produces quiet under the D1 conflation.
+        """
         engine = ReasoningEngine(quiet_window=timedelta(minutes=1))
-        sit = _situation_with_signals([_BASE])
-        # 5 minutes later — well past the 1-minute quiet window
-        with _patched_now(_BASE + timedelta(minutes=5)):
-            snap = engine.evaluate(sit)
+        clock = ReplayClock()
+        sit = Situation(clock=clock)
+        sit.attach_evidence(_signal_at(_BASE))
+        clock.observe(_BASE + timedelta(minutes=5))
+        snap = engine.evaluate(sit)
         assert snap.trend == Trend.DEESCALATING
         assert snap.quiet_detected is True
 
+    def test_engine_rejects_clock_mode_mismatch(self) -> None:
+        """Two components disagreeing about the time domain is defect D1 itself."""
+        engine = ReasoningEngine(clock_mode=ClockMode.SEPARATED)
+        sit = Situation(clock_mode=ClockMode.CONFLATED)
+        sit.attach_evidence(_signal_at(_BASE))
+        with pytest.raises(ValueError, match="clock mode mismatch"):
+            engine.evaluate(sit)
+
     def test_deceleration_triggers_deescalating(self) -> None:
-        """Events slowing down significantly → deescalating via interval comparison."""
+        """Events slowing down significantly â†’ deescalating via interval comparison."""
         engine = ReasoningEngine(
             trend_config=TrendConfig(rate_fall_factor=1.5, recent_count=3),
             quiet_window=timedelta(hours=1),  # don't trigger quiet
@@ -193,9 +206,9 @@ class TestTrendDetection:
         assert snap.trend == Trend.DEESCALATING
 
     def test_trend_transition_escalating_to_stable(self) -> None:
-        """Burst period followed by uniform period → transitions from escalating to stable."""
+        """Burst period followed by uniform period â†’ transitions from escalating to stable."""
         engine = _default_engine(quiet_window=timedelta(hours=1))
-        # Phase 1: slow then burst → escalating
+        # Phase 1: slow then burst â†’ escalating
         slow = [_BASE + timedelta(seconds=i * 60) for i in range(5)]
         fast_start = slow[-1] + timedelta(seconds=2)
         fast = [fast_start + timedelta(seconds=i * 2) for i in range(4)]
@@ -204,7 +217,7 @@ class TestTrendDetection:
             snap_esc = engine.evaluate(sit)
         assert snap_esc.trend == Trend.ESCALATING
 
-        # Phase 2: extend with many uniform events at 30s intervals → stabilizes
+        # Phase 2: extend with many uniform events at 30s intervals â†’ stabilizes
         # 30s is well within the stable zone after the initial slow (60s) + fast (2s)
         uniform_start = fast[-1] + timedelta(seconds=30)
         uniform = [uniform_start + timedelta(seconds=i * 30) for i in range(40)]
@@ -217,7 +230,7 @@ class TestTrendDetection:
         assert snap_stable.trend == Trend.STABLE
 
 
-# ── Reasoning Snapshot Tests ─────────────────────────────────────────────────
+# â”€â”€ Reasoning Snapshot Tests â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 
 class TestReasoningSnapshot:
@@ -252,7 +265,7 @@ class TestReasoningSnapshot:
         assert snap.trend == Trend.STABLE
 
 
-# ── Store Reasoning Summary Tests ────────────────────────────────────────────
+# â”€â”€ Store Reasoning Summary Tests â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 
 class TestStoreReasoningSummary:
@@ -279,12 +292,9 @@ class TestStoreReasoningSummary:
             dormancy_window=timedelta(minutes=10),
             reasoning_engine=engine,
         )
-        # Ingest one signal → situation will be quiet after 2 min → deescalating
-        sig = _signal_at(_BASE)
-        with _patched_now(_BASE):
-            await store.ingest(sig)
-        with _patched_now(_BASE + timedelta(minutes=2)):
-            summary = await store.reasoning_summary()
+        await store.ingest(_signal_at(_BASE))
+        store.clock.observe(_BASE + timedelta(minutes=2))
+        summary = await store.reasoning_summary()
         assert summary.total_situations == 1
         assert summary.deescalating_situations == 1
 
@@ -351,5 +361,5 @@ class TestStoreReasoningSummary:
             summary_a = await store_a.reasoning_summary()
             summary_b = await store_b.reasoning_summary()
 
-        # Different weights → different confidences
+        # Different weights â†’ different confidences
         assert summary_a.average_confidence != summary_b.average_confidence

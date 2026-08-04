@@ -57,6 +57,7 @@ reasoning_engine = ReasoningEngine(
     burst_factor=settings.burst_factor,
     burst_recent_count=settings.burst_recent_count,
     quiet_window=timedelta(minutes=settings.quiet_window_minutes),
+    clock_mode=settings.clock_mode,
 )
 
 # ── State ────────────────────────────────────────────────────────────────────
@@ -69,6 +70,7 @@ store = SituationStore(
     burst_recent_count=settings.burst_recent_count,
     quiet_window=timedelta(minutes=settings.quiet_window_minutes),
     reasoning_engine=reasoning_engine,
+    clock_mode=settings.clock_mode,
 )
 
 # ── Adapter Registry ────────────────────────────────────────────────────────
@@ -86,6 +88,8 @@ dashboard = DashboardManager(
     burst_factor=settings.burst_factor,
     burst_recent_count=settings.burst_recent_count,
     quiet_window=timedelta(minutes=settings.quiet_window_minutes),
+    dormancy_window=timedelta(minutes=settings.situation_dormancy_minutes),
+    ttl=timedelta(minutes=settings.situation_ttl_minutes),
 )
 
 # ── App ──────────────────────────────────────────────────────────────────────

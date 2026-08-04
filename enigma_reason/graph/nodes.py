@@ -26,10 +26,7 @@ from typing import Any, Callable
 from uuid import uuid4
 
 from enigma_reason.domain.hypothesis import (
-    UNKNOWN_DESCRIPTION,
     UNKNOWN_HYPOTHESIS_ID,
-    Hypothesis,
-    HypothesisStatus,
     make_unknown_hypothesis,
 )
 from enigma_reason.graph.state import ReasoningState
@@ -38,7 +35,42 @@ logger = logging.getLogger(__name__)
 
 # ── Type alias for LLM factory ──────────────────────────────────────────────
 
-LLMFactory = Callable[[], Any]  # Returns a langchain BaseChatModel
+LLMFactory = Callable[[], Any]
+
+# ── Sanity gate tuning ──────────────────────────────────────────────────────
+
+BENIGN_KEYWORDS: frozenset[str] = frozenset(
+    {"normal", "routine", "benign", "expected", "operational", "standard"}
+)
+VAGUE_KEYWORDS: frozenset[str] = frozenset({"something", "maybe", "possibly", "might be"})
+VAGUE_HYPOTHESIS_PENALTY: float = 0.1
+MINIMUM_HYPOTHESIS_CONFIDENCE: float = 0.1
+
+SPARSE_EVIDENCE_THRESHOLD: int = 3
+MODERATE_EVIDENCE_THRESHOLD: int = 5
+SPARSE_EVIDENCE_UNKNOWN_BOOST: float = 0.15
+MODERATE_EVIDENCE_UNKNOWN_BOOST: float = 0.05
+LOW_DIVERSITY_UNKNOWN_BOOST: float = 0.1
+FLAT_SPREAD_UNKNOWN_BOOST: float = 0.1
+FLAT_SPREAD_THRESHOLD: float = 0.1
+
+# ── Evaluation tuning ───────────────────────────────────────────────────────
+
+ASYMMETRIC_DECAY_MULTIPLIER: float = 1.5
+PRUNE_CONFIDENCE_FLOOR: float = 0.1
+
+# ── Convergence tuning ──────────────────────────────────────────────────────
+
+UNKNOWN_DOMINANCE_MARGIN: float = 0.15
+FLAT_DISTRIBUTION_PENALTY: float = 0.3
+HIGH_ANOMALY_LOW_DIVERSITY_PENALTY: float = 0.5
+HIGH_ANOMALY_THRESHOLD: float = 0.7
+STABILITY_SHIFT_SCALE: float = 5.0
+
+# ── Belief inertia ──────────────────────────────────────────────────────────
+
+DEFAULT_MAX_CONFIDENCE_DELTA: float = 0.15
+VELOCITY_DAMPING: float = 0.7
 
 
 # ── 1. assemble_context ─────────────────────────────────────────────────────
@@ -139,7 +171,7 @@ def _parse_hypotheses_response(text: str) -> list[dict]:
     # Strip markdown code fences if present
     if text.startswith("```"):
         lines = text.split("\n")
-        lines = [l for l in lines if not l.strip().startswith("```")]
+        lines = [line for line in lines if not line.strip().startswith("```")]
         text = "\n".join(lines).strip()
 
     try:
@@ -171,15 +203,22 @@ def _fallback_hypotheses() -> list[dict]:
     ]
 
 
-def make_generate_hypotheses(llm_factory: LLMFactory):
+def make_generate_hypotheses(llm_factory: LLMFactory, unknown_enabled: bool = True):
     """Create the generate_hypotheses node with an injected LLM factory.
 
-    Phase 5.1: Always injects the UNKNOWN hypothesis into the hypothesis list.
-    UNKNOWN competes with all other hypotheses and can never be pruned.
+    Args:
+        llm_factory: Callable returning a langchain chat model.
+        unknown_enabled: Ablation switch U. When False the permanent UNKNOWN
+            hypothesis is never created, so the reasoning path behaves as though
+            the mechanism had not been written. Downstream nodes already treat an
+            absent UNKNOWN as zero confidence, so nothing else needs to change.
+
+    Returns:
+        The generate_hypotheses node function.
     """
 
     def generate_hypotheses(state: ReasoningState) -> dict:
-        """Propose hypotheses via Gemini Flash based on structured context."""
+        """Propose hypotheses via the configured LLM from structured context."""
         context = state.get("context", {})
         existing = state.get("hypotheses", [])
 
@@ -192,18 +231,21 @@ def make_generate_hypotheses(llm_factory: LLMFactory):
             llm = llm_factory()
             response = llm.invoke(prompt)
             response_text = response.content if hasattr(response, "content") else str(response)
-            logger.info("Gemini hypothesis response length: %d chars", len(response_text))
+            logger.info("LLM hypothesis response length: %d chars", len(response_text))
             hypotheses = _parse_hypotheses_response(response_text)
         except Exception as exc:
-            logger.error("LLM invocation failed: %s — using fallback hypotheses", exc)
+            logger.error("LLM invocation failed: %s, using fallback hypotheses", exc)
             hypotheses = _fallback_hypotheses()
 
-        # ── Phase 5.1: Inject UNKNOWN if not present ────────────────────
+        if not unknown_enabled:
+            return {"hypotheses": [
+                h for h in hypotheses if h.get("hypothesis_id") != UNKNOWN_HYPOTHESIS_ID
+            ]}
+
         unknown_exists = any(
             h.get("hypothesis_id") == UNKNOWN_HYPOTHESIS_ID for h in hypotheses
         )
         if not unknown_exists:
-            # Carry over UNKNOWN from prior iteration if available
             prior_unknown = next(
                 (h for h in existing if h.get("hypothesis_id") == UNKNOWN_HYPOTHESIS_ID),
                 None,
@@ -243,24 +285,23 @@ def hypothesis_sanity_gate(state: ReasoningState) -> dict:
     seen_descriptions: set[str] = set()
     deduped = []
     for h in hypotheses:
+        h = dict(h)
         key = h.get("description", "").lower().strip()[:50]
         if key in seen_descriptions and h.get("hypothesis_id") != UNKNOWN_HYPOTHESIS_ID:
-            h = dict(h)
             h["status"] = "pruned"
-            logger.debug("Sanity gate: pruned duplicate hypothesis '%s'", h["description"])
+            logger.debug("Sanity gate pruned duplicate hypothesis: %s", h["description"])
         else:
             seen_descriptions.add(key)
         deduped.append(h)
 
     # ── Ensure at least one benign-sounding hypothesis ───────────────────
-    benign_keywords = {"normal", "routine", "benign", "expected", "operational", "standard"}
     active_non_unknown = [
         h for h in deduped
         if h.get("status") == "active"
         and h.get("hypothesis_id") != UNKNOWN_HYPOTHESIS_ID
     ]
     has_benign = any(
-        any(kw in h.get("description", "").lower() for kw in benign_keywords)
+        any(keyword in h.get("description", "").lower() for keyword in BENIGN_KEYWORDS)
         for h in active_non_unknown
     )
     if not has_benign and active_non_unknown:
@@ -270,15 +311,20 @@ def hypothesis_sanity_gate(state: ReasoningState) -> dict:
         ))
 
     # ── Penalise vague hypotheses ────────────────────────────────────────
-    vague_keywords = {"something", "maybe", "possibly", "might be"}
-    for h in deduped:
+    for index, h in enumerate(deduped):
         if h.get("status") != "active" or h.get("hypothesis_id") == UNKNOWN_HYPOTHESIS_ID:
             continue
         desc_lower = h.get("description", "").lower()
-        if any(kw in desc_lower for kw in vague_keywords):
-            h = dict(h)
-            h["confidence"] = max(0.1, h.get("confidence", 0.3) - 0.1)
-            logger.debug("Sanity gate: penalised vague hypothesis '%s'", h["description"])
+        if any(keyword in desc_lower for keyword in VAGUE_KEYWORDS):
+            before = h.get("confidence", 0.3)
+            after = max(MINIMUM_HYPOTHESIS_CONFIDENCE, before - VAGUE_HYPOTHESIS_PENALTY)
+            deduped[index] = {**h, "confidence": round(after, 4)}
+            logger.debug(
+                "Sanity gate penalised vague hypothesis: %s confidence %.4f to %.4f",
+                h.get("description"),
+                before,
+                after,
+            )
 
     # ── Boost UNKNOWN under sparse or contradictory evidence ─────────────
     unknown_h = next(
@@ -292,25 +338,30 @@ def hypothesis_sanity_gate(state: ReasoningState) -> dict:
             if h.get("hypothesis_id") == UNKNOWN_HYPOTHESIS_ID
         )
 
-        # Sparse evidence → UNKNOWN gains confidence
-        if evidence_count < 3:
-            unknown_h["confidence"] = min(1.0, unknown_h["confidence"] + 0.15)
-        elif evidence_count < 5:
-            unknown_h["confidence"] = min(1.0, unknown_h["confidence"] + 0.05)
+        if evidence_count < SPARSE_EVIDENCE_THRESHOLD:
+            unknown_h["confidence"] = min(
+                1.0, unknown_h["confidence"] + SPARSE_EVIDENCE_UNKNOWN_BOOST
+            )
+        elif evidence_count < MODERATE_EVIDENCE_THRESHOLD:
+            unknown_h["confidence"] = min(
+                1.0, unknown_h["confidence"] + MODERATE_EVIDENCE_UNKNOWN_BOOST
+            )
 
-        # Low diversity → UNKNOWN gains (single-source could be noise)
         if source_diversity <= 1:
-            unknown_h["confidence"] = min(1.0, unknown_h["confidence"] + 0.1)
+            unknown_h["confidence"] = min(
+                1.0, unknown_h["confidence"] + LOW_DIVERSITY_UNKNOWN_BOOST
+            )
 
-        # Flat confidence spread → UNKNOWN gains (ambiguity)
         active_confs = [
             h["confidence"] for h in deduped
             if h.get("status") == "active" and h.get("hypothesis_id") != UNKNOWN_HYPOTHESIS_ID
         ]
-        if active_confs and len(active_confs) >= 2:
+        if len(active_confs) >= 2:
             spread = max(active_confs) - min(active_confs)
-            if spread < 0.1:
-                unknown_h["confidence"] = min(1.0, unknown_h["confidence"] + 0.1)
+            if spread < FLAT_SPREAD_THRESHOLD:
+                unknown_h["confidence"] = min(
+                    1.0, unknown_h["confidence"] + FLAT_SPREAD_UNKNOWN_BOOST
+                )
 
         deduped[idx] = unknown_h
 
@@ -319,263 +370,317 @@ def hypothesis_sanity_gate(state: ReasoningState) -> dict:
 
 # ── 4. evaluate_hypotheses ──────────────────────────────────────────────────
 
-def evaluate_hypotheses(state: ReasoningState) -> dict:
-    """Deterministically adjust hypothesis confidence using reasoning facts.
+def make_evaluate_hypotheses(asymmetric_decay_enabled: bool = True):
+    """Create the evaluate_hypotheses node.
 
-    This node is PURE deterministic logic — no LLM calls.
-    It uses the reasoning snapshot to boost or penalise hypotheses.
+    Args:
+        asymmetric_decay_enabled: Ablation switch A. When False a negative
+            adjustment is applied at face value rather than multiplied, which is
+            exactly the behaviour of the node before the mechanism existed.
 
-    Phase 5.1: UNKNOWN is never pruned.  Negative evidence decays
-    confidence faster than positive evidence increases it.
+    Returns:
+        The evaluate_hypotheses node function.
     """
-    rs = state.get("reasoning_snapshot", {})
-    hypotheses = state.get("hypotheses", [])
-    if not hypotheses:
-        return {"hypotheses": [], "last_confidence_shift": 0.0}
 
-    trend = rs.get("trend", "stable")
-    burst = rs.get("burst_detected", False)
-    quiet = rs.get("quiet_detected", False)
-    confidence_level = rs.get("confidence_level", 0.0)
-    mean_anomaly = rs.get("mean_anomaly_score", 0.0)
+    def evaluate_hypotheses(state: ReasoningState) -> dict:
+        """Deterministically adjust hypothesis confidence using reasoning facts.
 
-    max_shift = 0.0
-    updated = []
-    for h in hypotheses:
-        if h.get("status") != "active":
+        Pure deterministic logic, no LLM calls. Records the pre-adjustment
+        confidence on each hypothesis so the inertia node can compute a real
+        per-iteration delta.
+
+        Args:
+            state: The current reasoning state.
+
+        Returns:
+            A partial state update carrying the adjusted hypotheses and the
+            largest absolute confidence shift observed in this pass.
+        """
+        rs = state.get("reasoning_snapshot", {})
+        hypotheses = state.get("hypotheses", [])
+        if not hypotheses:
+            return {"hypotheses": [], "last_confidence_shift": 0.0}
+
+        trend = rs.get("trend", "stable")
+        burst = rs.get("burst_detected", False)
+        quiet = rs.get("quiet_detected", False)
+        confidence_level = rs.get("confidence_level", 0.0)
+        mean_anomaly = rs.get("mean_anomaly_score", 0.0)
+
+        max_shift = 0.0
+        updated = []
+        for original in hypotheses:
+            if original.get("status") != "active":
+                updated.append(dict(original))
+                continue
+
+            h = dict(original)
+            old_conf = h["confidence"]
+            conf = old_conf
+
+            is_unknown = h.get("hypothesis_id") == UNKNOWN_HYPOTHESIS_ID
+
+            if not is_unknown:
+                if mean_anomaly > HIGH_ANOMALY_THRESHOLD:
+                    conf += 0.1
+                elif mean_anomaly < 0.3:
+                    conf -= 0.05
+
+                if burst:
+                    conf += 0.1
+
+                if quiet:
+                    conf -= 0.1
+
+                if trend == "escalating":
+                    conf += 0.05
+                elif trend == "deescalating":
+                    conf -= 0.05
+
+                conf += confidence_level * 0.1
+
+                delta = conf - old_conf
+                if asymmetric_decay_enabled and delta < 0:
+                    conf = old_conf + delta * ASYMMETRIC_DECAY_MULTIPLIER
+
+            conf = max(0.0, min(conf, 1.0))
+
+            if conf < PRUNE_CONFIDENCE_FLOOR and not is_unknown:
+                h["status"] = "pruned"
+                logger.debug("Pruned hypothesis: %s at confidence %.3f", h["description"], conf)
+
+            h["confidence_before_inertia"] = round(conf, 4)
+            h["confidence_previous"] = round(old_conf, 4)
+            h["confidence"] = round(conf, 4)
+            max_shift = max(max_shift, abs(conf - old_conf))
             updated.append(h)
-            continue
 
-        h = dict(h)  # work on a copy
-        old_conf = h["confidence"]
-        conf = old_conf
+        return {"hypotheses": updated, "last_confidence_shift": round(max_shift, 4)}
 
-        is_unknown = h.get("hypothesis_id") == UNKNOWN_HYPOTHESIS_ID
+    return evaluate_hypotheses
 
-        if not is_unknown:
-            # ── Deterministic adjustments based on reasoning facts ──
 
-            # High anomaly score boosts non-benign hypotheses
-            if mean_anomaly > 0.7:
-                conf += 0.1
-            elif mean_anomaly < 0.3:
-                conf -= 0.05
-
-            # Burst supports escalation-related hypotheses
-            if burst:
-                conf += 0.1
-
-            # Quiet reduces urgency
-            if quiet:
-                conf -= 0.1
-
-            # Strong trend alignment
-            if trend == "escalating":
-                conf += 0.05
-            elif trend == "deescalating":
-                conf -= 0.05
-
-            # Higher deterministic confidence boosts all hypotheses slightly
-            conf += confidence_level * 0.1
-
-            # ── Phase 5.1: Asymmetric adjustment ────────────────────
-            # Negative evidence decays confidence 1.5x faster
-            delta = conf - old_conf
-            if delta < 0:
-                conf = old_conf + delta * 1.5
-
-        # Clamp
-        conf = max(0.0, min(conf, 1.0))
-
-        # Prune weak hypotheses — but NEVER prune UNKNOWN
-        if conf < 0.1 and not is_unknown:
-            h["status"] = "pruned"
-            logger.debug("Pruned hypothesis: %s (conf=%.3f)", h["description"], conf)
-
-        h["confidence"] = round(conf, 4)
-        max_shift = max(max_shift, abs(conf - old_conf))
-        updated.append(h)
-
-    return {"hypotheses": updated, "last_confidence_shift": round(max_shift, 4)}
+evaluate_hypotheses = make_evaluate_hypotheses()
 
 
 # ── 5. apply_belief_inertia ─────────────────────────────────────────────────
 
-def apply_belief_inertia(state: ReasoningState) -> dict:
-    """Rate-limit confidence changes to prevent single-iteration convergence.
+def make_apply_belief_inertia(max_confidence_delta: float = DEFAULT_MAX_CONFIDENCE_DELTA):
+    """Create the apply_belief_inertia node.
 
-    Belief inertia dampens sudden jumps:
-    - velocity = smoothed rate of confidence change
-    - acceleration = rate of velocity change
-    - Confidence updates are clamped by max_confidence_step
+    Args:
+        max_confidence_delta: Largest absolute confidence change permitted in a
+            single iteration. Set to a very large number to disable the
+            mechanism, which makes the node a no-op on confidence and therefore
+            behaviourally identical to the node not being present. This argument
+            is authoritative; the identically named state field is carried for
+            run manifests and logging only, and never overrides it.
 
-    This is PURELY deterministic.  No LLM calls.
-
-    Configurable via state fields (injected from config at runner level).
+    Returns:
+        The apply_belief_inertia node function.
     """
-    hypotheses = state.get("hypotheses", [])
-    if not hypotheses:
-        return {"hypotheses": []}
 
-    # Config: maximum confidence change per iteration
-    max_step = 0.15  # hard cap on per-iteration confidence change
-    velocity_damping = 0.7  # how much old velocity is retained (0-1)
+    def apply_belief_inertia(state: ReasoningState) -> dict:
+        """Rate-limit per-iteration confidence change.
 
-    updated = []
-    for h in hypotheses:
-        if h.get("status") != "active":
+        The evaluation node records the pre-adjustment confidence on each
+        hypothesis. This node compares the two, clamps the change to
+        max_confidence_delta, and records both the pre-clamp and post-clamp
+        values so the clamp is auditable from the run log.
+
+        Args:
+            state: The current reasoning state.
+
+        Returns:
+            A partial state update carrying the clamped hypotheses.
+        """
+        hypotheses = state.get("hypotheses", [])
+        if not hypotheses:
+            return {"hypotheses": []}
+
+        cap = max_confidence_delta
+
+        updated = []
+        for original in hypotheses:
+            if original.get("status") != "active":
+                updated.append(dict(original))
+                continue
+
+            h = dict(original)
+            previous = h.get("confidence_previous", h.get("confidence", 0.3))
+            proposed = h.get("confidence_before_inertia", h.get("confidence", 0.3))
+
+            raw_delta = proposed - previous
+            if abs(raw_delta) > cap:
+                clamped_delta = cap if raw_delta > 0 else -cap
+                logger.debug(
+                    "Belief inertia clamped %s from delta %.4f to %.4f",
+                    h.get("hypothesis_id"),
+                    raw_delta,
+                    clamped_delta,
+                )
+            else:
+                clamped_delta = raw_delta
+
+            applied = max(0.0, min(previous + clamped_delta, 1.0))
+            old_velocity = h.get("belief_velocity", 0.0)
+            new_velocity = (
+                old_velocity * VELOCITY_DAMPING + (1.0 - VELOCITY_DAMPING) * clamped_delta
+            )
+
+            h["confidence_before_inertia"] = round(proposed, 4)
+            h["confidence"] = round(applied, 4)
+            h["belief_velocity"] = round(new_velocity, 4)
+            h["belief_acceleration"] = round(new_velocity - old_velocity, 4)
+            h["inertia_clamped"] = abs(raw_delta) > cap
             updated.append(h)
-            continue
 
-        h = dict(h)
-        old_velocity = h.get("belief_velocity", 0.0)
-        old_conf = h.get("confidence", 0.3)
+        return {"hypotheses": updated}
 
-        # Compute raw velocity (current - what it was before evaluation)
-        # The evaluation node already updated confidence, so we measure
-        # the delta and dampen it
-        raw_velocity = old_conf - (old_conf - old_velocity)  # simplified
+    return apply_belief_inertia
 
-        # Actually, we need to track pre-evaluation confidence.
-        # Since we don't have it in state, we use the velocity as a proxy:
-        # velocity = (new_conf - old_conf_before_eval) → already computed
-        # We dampen the existing velocity
-        new_velocity = old_velocity * velocity_damping + (1 - velocity_damping) * (old_conf * 0.1)
 
-        # Acceleration = change in velocity
-        new_acceleration = new_velocity - old_velocity
-
-        # Clamp confidence change from the initial state
-        # This prevents any hypothesis from jumping more than max_step
-        # per iteration from its starting point
-        if abs(new_velocity) > max_step:
-            new_velocity = max_step if new_velocity > 0 else -max_step
-
-        h["belief_velocity"] = round(new_velocity, 4)
-        h["belief_acceleration"] = round(new_acceleration, 4)
-        updated.append(h)
-
-    return {"hypotheses": updated}
+apply_belief_inertia = make_apply_belief_inertia()
 
 
 # ── 6. update_convergence ───────────────────────────────────────────────────
 
-def update_convergence(state: ReasoningState) -> dict:
-    """Compute convergence_score from hypothesis confidence distribution.
+def make_update_convergence(persistence_required: bool = True):
+    """Create the update_convergence node.
 
-    Phase 5.1 hardening:
-    - Convergence requires dominance OVER the UNKNOWN hypothesis
-    - Dominant hypothesis must sustain lead for convergence_persistence iterations
-    - Flat distributions strongly penalise convergence
-    - High anomaly with low diversity delays convergence
-    - Tracks belief_stability_score and undecided_iterations
+    Args:
+        persistence_required: Ablation switch P. When False a leader may
+            converge on the iteration it first takes the lead, which is the
+            behaviour before the sustained dominance requirement existed.
+
+    Returns:
+        The update_convergence node function.
     """
-    hypotheses = state.get("hypotheses", [])
-    iteration = state.get("iteration_count", 0) + 1
-    required_persistence = state.get("convergence_persistence", 2)
 
-    active = [h for h in hypotheses if h.get("status") == "active"]
-    if not active:
+    def update_convergence(state: ReasoningState) -> dict:
+        """Compute convergence_score from the hypothesis confidence distribution.
+
+        This node is pure. It never mutates the hypotheses it is given; every
+        returned hypothesis is a new dict. Mutating shared state here made the
+        result depend on evaluation order, which is recorded as defect D4 in
+        paper/EVIDENCE.md.
+
+        Args:
+            state: The current reasoning state.
+
+        Returns:
+            A partial state update carrying a new hypothesis list, the
+            convergence score, the iteration count, the belief stability score
+            and the undecided iteration counter.
+        """
+        source = state.get("hypotheses", [])
+        hypotheses = [dict(h) for h in source]
+        iteration = state.get("iteration_count", 0) + 1
+        required_persistence = state.get("convergence_persistence", 2)
+        threshold = state.get("convergence_threshold", 0.8)
+
+        active = [h for h in hypotheses if h.get("status") == "active"]
+        if not active:
+            return {
+                "convergence_score": 0.0,
+                "iteration_count": iteration,
+                "hypotheses": hypotheses,
+                "belief_stability_score": 0.0,
+                "undecided_iterations": state.get("undecided_iterations", 0) + 1,
+            }
+
+        confidences = [h["confidence"] for h in active]
+        max_conf = max(confidences)
+        mean_conf = sum(confidences) / len(confidences)
+
+        dominant = max(active, key=lambda h: h["confidence"])
+        dominant_id = dominant.get("hypothesis_id")
+
+        unknown = next(
+            (h for h in active if h.get("hypothesis_id") == UNKNOWN_HYPOTHESIS_ID), None,
+        )
+        unknown_conf = unknown["confidence"] if unknown else 0.0
+
+        if dominant_id == UNKNOWN_HYPOTHESIS_ID:
+            convergence = 0.0
+            undecided = state.get("undecided_iterations", 0) + 1
+            for h in active:
+                h["dominant_iterations"] = 0
+        else:
+            margin_over_unknown = max_conf - unknown_conf
+            if margin_over_unknown < UNKNOWN_DOMINANCE_MARGIN:
+                convergence = margin_over_unknown * 2.0
+                undecided = state.get("undecided_iterations", 0) + 1
+            else:
+                undecided = 0
+
+            if len(active) == 1:
+                convergence = max_conf
+            else:
+                spread = max_conf - mean_conf
+                convergence = min(spread * 2.0 + margin_over_unknown * 0.5, 1.0)
+
+            if len(active) >= 2:
+                conf_range = max(confidences) - min(confidences)
+                if conf_range < FLAT_SPREAD_THRESHOLD:
+                    convergence *= FLAT_DISTRIBUTION_PENALTY
+
+            rs = state.get("reasoning_snapshot", {})
+            if (
+                rs.get("mean_anomaly_score", 0.0) > HIGH_ANOMALY_THRESHOLD
+                and rs.get("source_diversity", 0) <= 1
+            ):
+                convergence *= HIGH_ANOMALY_LOW_DIVERSITY_PENALTY
+
+            for h in active:
+                if h.get("hypothesis_id") == dominant_id:
+                    h["dominant_iterations"] = h.get("dominant_iterations", 0) + 1
+                else:
+                    h["dominant_iterations"] = 0
+
+        dominant_iters = dominant.get("dominant_iterations", 0)
+        persistence_satisfied = (not persistence_required) or (
+            dominant_iters >= required_persistence
+        )
+
+        if (
+            persistence_required
+            and not persistence_satisfied
+            and dominant_id != UNKNOWN_HYPOTHESIS_ID
+        ):
+            convergence = min(convergence, threshold - 0.01)
+
+        last_shift = state.get("last_confidence_shift", 0.0)
+        stability = max(0.0, 1.0 - last_shift * STABILITY_SHIFT_SCALE)
+
+        if (
+            convergence >= threshold
+            and dominant_id != UNKNOWN_HYPOTHESIS_ID
+            and persistence_satisfied
+        ):
+            for h in hypotheses:
+                if h.get("status") == "active" and h.get("hypothesis_id") == dominant_id:
+                    h["status"] = "converged"
+                    break
+
+        logger.debug(
+            "Convergence %.3f at iteration %d, %d active, dominant %s, "
+            "dominant_iterations %d, stability %.2f",
+            convergence, iteration, len(active), dominant_id, dominant_iters, stability,
+        )
+
         return {
-            "convergence_score": 0.0,
+            "convergence_score": round(max(0.0, min(convergence, 1.0)), 4),
             "iteration_count": iteration,
-            "belief_stability_score": 0.0,
-            "undecided_iterations": state.get("undecided_iterations", 0) + 1,
+            "hypotheses": hypotheses,
+            "belief_stability_score": round(stability, 4),
+            "undecided_iterations": undecided,
         }
 
-    confidences = [h["confidence"] for h in active]
-    max_conf = max(confidences)
-    mean_conf = sum(confidences) / len(confidences)
+    return update_convergence
 
-    # Find the dominant hypothesis
-    dominant = max(active, key=lambda h: h["confidence"])
-    dominant_id = dominant.get("hypothesis_id")
 
-    # Find UNKNOWN
-    unknown = next(
-        (h for h in active if h.get("hypothesis_id") == UNKNOWN_HYPOTHESIS_ID), None,
-    )
-    unknown_conf = unknown["confidence"] if unknown else 0.0
-
-    # ── Dominance must be over UNKNOWN, not just over the mean ──────────
-    if dominant_id == UNKNOWN_HYPOTHESIS_ID:
-        # UNKNOWN is dominant → system is explicitly undecided
-        convergence = 0.0
-        undecided = state.get("undecided_iterations", 0) + 1
-        # Reset all dominant_iterations
-        for h in hypotheses:
-            if h.get("status") == "active":
-                h["dominant_iterations"] = 0
-    else:
-        # Leader must beat UNKNOWN by a meaningful margin
-        margin_over_unknown = max_conf - unknown_conf
-        if margin_over_unknown < 0.15:
-            # Not convincingly ahead of UNKNOWN
-            convergence = margin_over_unknown * 2.0  # weak convergence
-            undecided = state.get("undecided_iterations", 0) + 1
-        else:
-            undecided = 0
-
-        if len(active) == 1:
-            convergence = max_conf
-        else:
-            spread = max_conf - mean_conf
-            convergence = min(spread * 2.0 + margin_over_unknown * 0.5, 1.0)
-
-        # ── Flat distribution penalty ───────────────────────────────────
-        if len(active) >= 2:
-            conf_range = max(confidences) - min(confidences)
-            if conf_range < 0.1:
-                convergence *= 0.3  # strong penalty for ambiguity
-
-        # ── High anomaly + low diversity penalty ────────────────────────
-        rs = state.get("reasoning_snapshot", {})
-        if rs.get("mean_anomaly_score", 0.0) > 0.7 and rs.get("source_diversity", 0) <= 1:
-            convergence *= 0.5
-
-        # ── Track dominant iterations for persistence requirement ───────
-        for h in hypotheses:
-            if h.get("status") != "active":
-                continue
-            if h.get("hypothesis_id") == dominant_id:
-                h["dominant_iterations"] = h.get("dominant_iterations", 0) + 1
-            else:
-                h["dominant_iterations"] = 0
-
-    # ── Sustained dominance check ───────────────────────────────────────
-    # Convergence is only allowed if the leader has been dominant for N iterations
-    dominant_iters = dominant.get("dominant_iterations", 0)
-    if dominant_iters < required_persistence and dominant_id != UNKNOWN_HYPOTHESIS_ID:
-        convergence = min(convergence, state.get("convergence_threshold", 0.8) - 0.01)
-
-    # ── Belief stability score ──────────────────────────────────────────
-    last_shift = state.get("last_confidence_shift", 0.0)
-    stability = max(0.0, 1.0 - last_shift * 5.0)  # high shift → low stability
-
-    # Mark converged only if truly converged AND sustained
-    threshold = state.get("convergence_threshold", 0.8)
-    if (
-        convergence >= threshold
-        and dominant_id != UNKNOWN_HYPOTHESIS_ID
-        and dominant_iters >= required_persistence
-    ):
-        for h in hypotheses:
-            if h.get("status") == "active" and h.get("hypothesis_id") == dominant_id:
-                h["status"] = "converged"
-                break
-
-    logger.debug(
-        "Convergence: %.3f (iteration %d, %d active, dominant=%s, dom_iters=%d, stability=%.2f)",
-        convergence, iteration, len(active), dominant_id, dominant_iters, stability,
-    )
-
-    return {
-        "convergence_score": round(max(0.0, min(convergence, 1.0)), 4),
-        "iteration_count": iteration,
-        "hypotheses": hypotheses,
-        "belief_stability_score": round(stability, 4),
-        "undecided_iterations": undecided,
-    }
+update_convergence = make_update_convergence()
 
 
 # ── 7. check_convergence ───────────────────────────────────────────────────

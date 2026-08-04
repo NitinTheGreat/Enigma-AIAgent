@@ -18,12 +18,10 @@ import json
 import logging
 from datetime import timedelta
 from typing import Any
-from uuid import UUID
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from enigma_reason.core.reasoning_engine import ReasoningEngine
-from enigma_reason.domain.explanation import filter_explanation_for_role, ExplanationRole
 from enigma_reason.domain.situation import Situation
 from enigma_reason.explain.builder import build_explanation
 from enigma_reason.explain.formatter import ExplanationFormatter
@@ -41,11 +39,25 @@ class DashboardManager:
         burst_factor: float = 3.0,
         burst_recent_count: int = 3,
         quiet_window: timedelta = timedelta(minutes=5),
+        dormancy_window: timedelta = timedelta(minutes=10),
+        ttl: timedelta = timedelta(minutes=30),
     ) -> None:
+        """
+        Args:
+            reasoning_engine: Engine used to derive the Phase 4 snapshot.
+            burst_factor: Multiplier defining a burst.
+            burst_recent_count: Recent intervals compared for burst detection.
+            quiet_window: Inactivity duration that qualifies as quiet.
+            dormancy_window: Passed through to Situation.summary so the payload
+                carries a lifecycle label the dashboard can render.
+            ttl: Passed through to Situation.summary alongside dormancy_window.
+        """
         self._reasoning_engine = reasoning_engine
         self._burst_factor = burst_factor
         self._burst_recent_count = burst_recent_count
         self._quiet_window = quiet_window
+        self._dormancy_window = dormancy_window
+        self._ttl = ttl
         self._clients: set[WebSocket] = set()
         self._lock = asyncio.Lock()
 
@@ -121,7 +133,10 @@ class DashboardManager:
             "type": "situation_analysis",
 
             # Situation facts
-            "situation": situation.summary(),
+            "situation": situation.summary(
+                dormancy_window=self._dormancy_window,
+                ttl=self._ttl,
+            ),
 
             # Temporal
             "temporal": temporal.model_dump(),

@@ -6,7 +6,7 @@ safety, UNKNOWN hypothesis behaviour, belief inertia, sanity gate,
 and sustained convergence requirements.
 
 LLM responses are mocked at the LangChain invoke level for CI
-determinism — production uses real Gemini Flash.
+determinism â€” production uses real Gemini Flash.
 """
 
 from __future__ import annotations
@@ -14,7 +14,6 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 from types import SimpleNamespace
-from typing import Any
 from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
@@ -30,6 +29,7 @@ from enigma_reason.domain.reasoning import SituationReasoningSnapshot, Trend
 from enigma_reason.domain.temporal import SituationTemporalSnapshot
 from enigma_reason.graph.builder import build_reasoning_graph
 from enigma_reason.graph.nodes import (
+    make_apply_belief_inertia,
     apply_belief_inertia,
     assemble_context,
     check_convergence,
@@ -42,7 +42,7 @@ from enigma_reason.graph.runner import run_reasoning
 from enigma_reason.graph.state import ReasoningState
 
 
-# ── Helpers ──────────────────────────────────────────────────────────────────
+# â”€â”€ Helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 _BASE = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
 
@@ -134,7 +134,7 @@ def _hyp(desc: str, conf: float, hid: str | None = None, status: str = "active",
     }
 
 
-# ── Hypothesis Model Tests ───────────────────────────────────────────────────
+# â”€â”€ Hypothesis Model Tests â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 
 class TestHypothesisModel:
@@ -174,7 +174,7 @@ class TestHypothesisModel:
         assert u["dominant_iterations"] == 0
 
 
-# ── Node Tests ───────────────────────────────────────────────────────────────
+# â”€â”€ Node Tests â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 
 class TestAssembleContext:
@@ -265,7 +265,7 @@ class TestGenerateHypotheses:
         assert len(hyps) >= 3
 
 
-# ── Sanity Gate Tests ────────────────────────────────────────────────────────
+# â”€â”€ Sanity Gate Tests â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 
 class TestSanityGate:
@@ -341,7 +341,7 @@ class TestSanityGate:
         assert result["hypotheses"][0]["hypothesis_id"] == UNKNOWN_HYPOTHESIS_ID
 
 
-# ── Evaluation Tests ─────────────────────────────────────────────────────────
+# â”€â”€ Evaluation Tests â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 
 class TestEvaluateHypotheses:
@@ -420,15 +420,8 @@ class TestEvaluateHypotheses:
         result_neg = evaluate_hypotheses(state_neg)
         neg_conf = result_neg["hypotheses"][0]["confidence"]
 
-        # With asymmetric decay, the drop should be amplified
-        pos_delta = pos_conf - 0.4
-        neg_delta = 0.4 - neg_conf
-
-        # Both start at 0.4, positive gets +0.1 + (0.5*0.1)=+0.05 net boost
-        # Negative gets -0.05 then *1.5 = -0.075 + (0.5*0.1)=+0.05 net
-        # The key property: the system penalises more aggressively downward
-        assert neg_conf < 0.4  # negative scenario actually lowered confidence
-        assert pos_conf > 0.4  # positive scenario actually raised confidence
+        assert neg_conf < 0.4
+        assert pos_conf > 0.4
 
     def test_tracks_last_confidence_shift(self) -> None:
         """Evaluation returns the max confidence shift for stability tracking."""
@@ -448,7 +441,7 @@ class TestEvaluateHypotheses:
         assert result["hypotheses"][0]["status"] == "pruned"
 
 
-# ── Belief Inertia Tests ────────────────────────────────────────────────────
+# â”€â”€ Belief Inertia Tests â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 
 class TestBeliefInertia:
@@ -461,13 +454,67 @@ class TestBeliefInertia:
         assert "belief_acceleration" in h
 
     def test_velocity_is_dampened(self) -> None:
-        """High velocities should be dampened by the inertia system."""
-        hyps = [_hyp("High velocity hypothesis test", 0.5, belief_velocity=0.5)]
+        """Velocity is a smoothed view of the applied confidence delta.
+
+        Rewritten for Level 2. The original asserted a cap on belief_velocity,
+        which was the only field the node wrote and which never influenced
+        confidence. Defect D2. The mechanism now caps the confidence delta, so
+        the meaningful assertion is that velocity tracks the applied delta and
+        can never exceed the cap.
+        """
+        hyps = [_hyp("High velocity hypothesis test", 0.9, belief_velocity=0.0)]
+        hyps[0]["confidence_previous"] = 0.2
+        hyps[0]["confidence_before_inertia"] = 0.9
         state = _base_state(hypotheses=hyps)
+        state["max_confidence_delta"] = 0.15
         result = apply_belief_inertia(state)
         h = result["hypotheses"][0]
-        # Velocity should be reduced (dampened)
-        assert abs(h["belief_velocity"]) <= 0.15  # max_step cap
+        assert abs(h["belief_velocity"]) <= 0.15
+        assert h["confidence"] == pytest.approx(0.35)
+
+    def test_confidence_delta_is_clamped_to_cap(self) -> None:
+        """Regression for D2. A raw update of 0.25 must be clamped to the cap."""
+        hyps = [_hyp("Rapid belief shift hypothesis", 0.55)]
+        hyps[0]["confidence_previous"] = 0.30
+        hyps[0]["confidence_before_inertia"] = 0.55
+        state = _base_state(hypotheses=hyps)
+        state["max_confidence_delta"] = 0.10
+        node = make_apply_belief_inertia(max_confidence_delta=0.10)
+        result = node(state)
+        h = result["hypotheses"][0]
+        assert h["confidence"] == pytest.approx(0.40)
+        assert h["confidence_before_inertia"] == pytest.approx(0.55)
+        assert h["inertia_clamped"] is True
+
+    def test_negative_delta_is_clamped_symmetrically(self) -> None:
+        hyps = [_hyp("Collapsing belief hypothesis", 0.10)]
+        hyps[0]["confidence_previous"] = 0.60
+        hyps[0]["confidence_before_inertia"] = 0.10
+        node = make_apply_belief_inertia(max_confidence_delta=0.10)
+        result = node(_base_state(hypotheses=hyps))
+        h = result["hypotheses"][0]
+        assert h["confidence"] == pytest.approx(0.50)
+        assert h["inertia_clamped"] is True
+
+    def test_delta_within_cap_is_untouched(self) -> None:
+        hyps = [_hyp("Gentle belief shift hypothesis", 0.35)]
+        hyps[0]["confidence_previous"] = 0.30
+        hyps[0]["confidence_before_inertia"] = 0.35
+        node = make_apply_belief_inertia(max_confidence_delta=0.15)
+        result = node(_base_state(hypotheses=hyps))
+        h = result["hypotheses"][0]
+        assert h["confidence"] == pytest.approx(0.35)
+        assert h["inertia_clamped"] is False
+
+    def test_large_cap_disables_the_mechanism(self) -> None:
+        """Ablation: an unbounded cap must leave confidence exactly as proposed."""
+        hyps = [_hyp("Unconstrained belief hypothesis", 0.95)]
+        hyps[0]["confidence_previous"] = 0.10
+        hyps[0]["confidence_before_inertia"] = 0.95
+        node = make_apply_belief_inertia(max_confidence_delta=float("inf"))
+        result = node(_base_state(hypotheses=hyps))
+        assert result["hypotheses"][0]["confidence"] == pytest.approx(0.95)
+        assert result["hypotheses"][0]["inertia_clamped"] is False
 
     def test_skips_non_active(self) -> None:
         hyps = [_hyp("Pruned hypothesis skip", 0.3, status="pruned", belief_velocity=0.1)]
@@ -476,7 +523,7 @@ class TestBeliefInertia:
         assert result["hypotheses"][0]["belief_velocity"] == 0.1  # unchanged
 
 
-# ── Convergence Tests ────────────────────────────────────────────────────────
+# â”€â”€ Convergence Tests â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 
 class TestUpdateConvergence:
@@ -559,7 +606,7 @@ class TestUpdateConvergence:
         assert result["iteration_count"] == 3
 
     def test_belief_stability_tracked(self) -> None:
-        """High confidence shift → low belief stability."""
+        """High confidence shift â†’ low belief stability."""
         state = _base_state(
             hypotheses=[make_unknown_hypothesis(0.4)],
             last_confidence_shift=0.3,
@@ -582,7 +629,7 @@ class TestCheckConvergence:
         assert check_convergence(state) == "end"
 
 
-# ── Graph Integration Tests ─────────────────────────────────────────────────
+# â”€â”€ Graph Integration Tests â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 
 class TestGraphIntegration:
@@ -661,13 +708,13 @@ class TestGraphIntegration:
             assert "dominant_iterations" in h
 
 
-# ── Runner Tests ─────────────────────────────────────────────────────────────
+# â”€â”€ Runner Tests â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 
 class TestRunner:
     def test_run_reasoning_returns_valid_state(self) -> None:
         mock_llm = _mock_llm_response(_sample_hypotheses_json())
-        with patch("enigma_reason.domain.situation.utc_now", return_value=_BASE):
+        with patch("enigma_reason.foundation.clock.utc_now", return_value=_BASE):
             from enigma_reason.domain.situation import Situation
             sit = Situation()
 
@@ -713,7 +760,7 @@ class TestRunner:
     def test_runner_unknown_present_in_output(self) -> None:
         """Runner output must always include UNKNOWN."""
         mock_llm = _mock_llm_response(_sample_hypotheses_json())
-        with patch("enigma_reason.domain.situation.utc_now", return_value=_BASE):
+        with patch("enigma_reason.foundation.clock.utc_now", return_value=_BASE):
             from enigma_reason.domain.situation import Situation
             sit = Situation()
 

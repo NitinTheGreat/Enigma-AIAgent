@@ -4,7 +4,6 @@ from datetime import timedelta
 
 from enigma_reason.domain.situation import Situation
 from enigma_reason.domain.signal import Signal
-from enigma_reason.domain.enums import SignalType
 
 from tests.test_signal import _valid_signal
 

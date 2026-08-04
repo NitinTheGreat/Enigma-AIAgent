@@ -21,7 +21,7 @@ from uuid import uuid4
 
 from enigma_reason.adapters.base import SignalAdapter
 from enigma_reason.domain.enums import EntityKind, SignalType
-from enigma_reason.domain.signal import EntityRef, Signal
+from enigma_reason.domain.signal import Signal
 
 
 class NetworkAnomalyAdapter(SignalAdapter):

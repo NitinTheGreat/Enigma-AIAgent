@@ -127,11 +127,22 @@ class UNSWThreatAdapter(SignalAdapter):
                     )
 
         # ── Scores ───────────────────────────────────────────────────────
-        anomaly_score = float(xai.get("anomaly_score", 0.5))
-        anomaly_score = max(0.0, min(1.0, anomaly_score))
+        # anomaly_score is 1 - P(normal) as emitted by the sensor. Older
+        # payloads sent the maximum softmax probability under this name; when
+        # the sensor supplies predicted_class_confidence we know it is the
+        # corrected format, otherwise we fall back and derive what we can.
+        anomaly_score = _clamp_unit(xai.get("anomaly_score", 0.5))
+        predicted_class_confidence = xai.get("predicted_class_confidence")
+        if predicted_class_confidence is not None:
+            predicted_class_confidence = _clamp_unit(predicted_class_confidence)
 
-        confidence = float(xai.get("confidence", anomaly_score))
-        confidence = max(0.0, min(1.0, confidence))
+        predictive_entropy = xai.get("predictive_entropy")
+        if predictive_entropy is not None:
+            predictive_entropy = _clamp_unit(predictive_entropy)
+
+        confidence = _clamp_unit(
+            xai.get("confidence", predicted_class_confidence or anomaly_score)
+        )
 
         # ── Features ────────────────────────────────────────────────────
         features = xai.get("features", [])
@@ -143,6 +154,11 @@ class UNSWThreatAdapter(SignalAdapter):
         # ── Source ───────────────────────────────────────────────────────
         source = xai.get("source", "unsw-threat-detector")
 
+        abstained = bool(xai.get("abstained", False))
+        calibrated_confidence = xai.get("calibrated_confidence")
+        if calibrated_confidence is not None:
+            calibrated_confidence = max(0.0, min(1.0, float(calibrated_confidence)))
+
         return Signal.model_validate({
             "signal_id": str(signal_id),
             "timestamp": ts.isoformat(),
@@ -150,6 +166,22 @@ class UNSWThreatAdapter(SignalAdapter):
             "entity": {"kind": entity.kind.value, "identifier": entity.identifier} if entity else None,
             "anomaly_score": anomaly_score,
             "confidence": confidence,
+            "predicted_class_confidence": predicted_class_confidence,
+            "predictive_entropy": predictive_entropy,
             "features": features,
             "source": source,
+            "abstained": abstained,
+            "calibrated_confidence": calibrated_confidence,
         })
+
+
+def _clamp_unit(value: Any) -> float:
+    """Coerce a value to a float on the closed unit interval.
+
+    Args:
+        value: Anything float-convertible.
+
+    Returns:
+        The value clamped to [0.0, 1.0].
+    """
+    return max(0.0, min(1.0, float(value)))

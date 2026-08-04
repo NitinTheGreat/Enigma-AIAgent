@@ -21,7 +21,7 @@ from enigma_reason.config import settings
 from enigma_reason.domain.reasoning import SituationReasoningSnapshot
 from enigma_reason.domain.situation import Situation
 from enigma_reason.domain.temporal import SituationTemporalSnapshot
-from enigma_reason.graph.builder import build_reasoning_graph
+from enigma_reason.graph.builder import EpistemicControls, build_reasoning_graph
 from enigma_reason.graph.state import ReasoningState
 
 logger = logging.getLogger(__name__)
@@ -46,6 +46,22 @@ def _default_llm_factory():
     )
 
 
+def controls_from_settings() -> EpistemicControls:
+    """Build the epistemic control set from environment-backed settings.
+
+    Returns:
+        An EpistemicControls carrying the four ablation switches and the
+        belief inertia cap as configured by the ENIGMA_ environment variables.
+    """
+    return EpistemicControls(
+        unknown_hypothesis_enabled=settings.unknown_hypothesis_enabled,
+        sanity_gate_enabled=settings.sanity_gate_enabled,
+        asymmetric_decay_enabled=settings.asymmetric_decay_enabled,
+        persistence_required=settings.persistence_required,
+        max_confidence_delta=settings.max_confidence_delta,
+    )
+
+
 def run_reasoning(
     situation: Situation,
     temporal: SituationTemporalSnapshot,
@@ -55,6 +71,7 @@ def run_reasoning(
     max_iterations: int | None = None,
     convergence_threshold: float | None = None,
     convergence_persistence: int | None = None,
+    controls: EpistemicControls | None = None,
 ) -> dict[str, Any]:
     """Invoke the reasoning graph for a given situation.
 
@@ -62,20 +79,23 @@ def run_reasoning(
         situation: The situation to reason about.
         temporal: Phase 2 temporal snapshot.
         reasoning: Phase 4 reasoning snapshot.
-        llm_factory: Optional override for LLM construction (for testing).
+        llm_factory: Optional override for LLM construction, used by tests.
         max_iterations: Override max loop iterations.
         convergence_threshold: Override convergence exit threshold.
         convergence_persistence: Override required dominant iterations.
+        controls: Override the epistemic control set. Defaults to the values in
+            settings, which Level 9 varies through environment variables.
 
     Returns:
-        Final ReasoningState dict with hypotheses, convergence_score, etc.
+        Final ReasoningState dict with hypotheses, convergence_score and the
+        epistemic control set that produced it.
     """
     factory = llm_factory or _default_llm_factory
     max_iter = max_iterations or settings.graph_max_iterations
     conv_threshold = convergence_threshold or settings.graph_convergence_threshold
     conv_persistence = convergence_persistence or settings.graph_convergence_persistence
+    active_controls = controls or controls_from_settings()
 
-    # Seed initial state — Phase 5.1 adds epistemic control fields
     initial_state: ReasoningState = {
         "situation_id": str(situation.situation_id),
         "temporal_snapshot": temporal.model_dump(),
@@ -86,25 +106,31 @@ def run_reasoning(
         "convergence_score": 0.0,
         "max_iterations": max_iter,
         "convergence_threshold": conv_threshold,
-        # Phase 5.1 epistemic controls
         "belief_stability_score": 0.0,
         "undecided_iterations": 0,
         "last_confidence_shift": 0.0,
         "convergence_persistence": conv_persistence,
+        "max_confidence_delta": active_controls.max_confidence_delta,
     }
 
-    # Build and invoke graph
-    compiled_graph = build_reasoning_graph(factory)
+    compiled_graph = build_reasoning_graph(factory, controls=active_controls)
     logger.info(
-        "Running reasoning graph for situation %s (max_iter=%d, threshold=%.2f, persistence=%d)",
-        situation.situation_id, max_iter, conv_threshold, conv_persistence,
+        "Running reasoning graph for situation %s, max_iterations=%d, "
+        "threshold=%.2f, persistence=%d, controls=%s",
+        situation.situation_id,
+        max_iter,
+        conv_threshold,
+        conv_persistence,
+        active_controls.as_dict(),
     )
 
     final_state = compiled_graph.invoke(initial_state)
+    final_state["epistemic_controls"] = active_controls.as_dict()
+    final_state["clock_mode"] = situation.clock_mode.value
 
     logger.info(
-        "Reasoning complete: situation=%s iterations=%d convergence=%.3f hypotheses=%d "
-        "stability=%.3f undecided=%d",
+        "Reasoning complete for situation %s, iterations=%d convergence=%.3f "
+        "hypotheses=%d stability=%.3f undecided=%d",
         situation.situation_id,
         final_state.get("iteration_count", 0),
         final_state.get("convergence_score", 0.0),

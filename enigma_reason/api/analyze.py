@@ -51,7 +51,9 @@ def create_analyze_router(
         situations = []
         async with store._lock:
             for sit in store._situations.values():
-                situations.append(sit.summary())
+                situations.append(
+                    sit.summary(dormancy_window=store._dormancy_window, ttl=store._ttl)
+                )
         return {"situations": situations, "count": len(situations)}
 
     @router.get("/situation/{situation_id}/analyze")
@@ -118,7 +120,9 @@ def create_analyze_router(
         # ── Build response ────────────────────────────────────────
         return {
             # Situation facts
-            "situation": situation.summary(),
+            "situation": situation.summary(
+                dormancy_window=store._dormancy_window, ttl=store._ttl
+            ),
 
             # Temporal awareness
             "temporal": temporal.model_dump(),

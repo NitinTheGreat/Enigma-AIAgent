@@ -6,20 +6,19 @@ Uses clock patching via enigma_reason.foundation.clock.utc_now.
 
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
-from uuid import uuid4
 
 import pytest
 
-from enigma_reason.domain.enums import SignalType
 from enigma_reason.domain.signal import Signal
 from enigma_reason.domain.situation import Situation
 from enigma_reason.domain.temporal import SituationTemporalSnapshot
+from enigma_reason.foundation.clock import ClockMode, ReplayClock
 from enigma_reason.store.situation_store import SituationStore
 
 from tests.test_signal import _valid_signal
 
 
-# ── Helpers ──────────────────────────────────────────────────────────────────
+# â”€â”€ Helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 _BASE = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
 
@@ -31,7 +30,7 @@ def _signal_at(ts: datetime, **overrides) -> Signal:
 
 def _patched_now(dt: datetime):
     """Context manager to freeze utc_now() everywhere it's imported."""
-    return patch("enigma_reason.domain.situation.utc_now", return_value=dt)
+    return patch("enigma_reason.foundation.clock.utc_now", return_value=dt)
 
 
 def _situation_with_events(timestamps: list[datetime]) -> Situation:
@@ -45,7 +44,7 @@ def _situation_with_events(timestamps: list[datetime]) -> Situation:
     return sit
 
 
-# ── Temporal Metric Tests ────────────────────────────────────────────────────
+# â”€â”€ Temporal Metric Tests â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 
 class TestTemporalMetrics:
@@ -117,10 +116,10 @@ class TestTemporalMetrics:
         assert sit.event_rate == 0.0
 
     def test_event_rate_calculation(self) -> None:
-        # 6 events over 3 minutes → 2 events/minute
+        # 6 events over 3 minutes â†’ 2 events/minute
         timestamps = [_BASE + timedelta(seconds=i * 30) for i in range(7)]
         sit = _situation_with_events(timestamps)
-        # active_duration = 180s, 7 events → 7/180*60 = ~2.33 events/min
+        # active_duration = 180s, 7 events â†’ 7/180*60 = ~2.33 events/min
         assert sit.event_rate == pytest.approx(7.0 / 180.0 * 60.0, rel=1e-6)
 
     def test_event_rate_two_events(self) -> None:
@@ -129,17 +128,17 @@ class TestTemporalMetrics:
         assert sit.event_rate == pytest.approx(2.0)  # 2 events / 1 minute
 
 
-# ── Burst Detection Tests ───────────────────────────────────────────────────
+# â”€â”€ Burst Detection Tests â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 
 class TestBurstDetection:
     def test_no_burst_with_insufficient_data(self) -> None:
-        """Less than recent_count+1 events → never bursting."""
+        """Less than recent_count+1 events â†’ never bursting."""
         sit = _situation_with_events([_BASE, _BASE + timedelta(seconds=10)])
         assert not sit.is_bursting(burst_factor=3.0, recent_count=3)
 
     def test_no_burst_uniform_intervals(self) -> None:
-        """Uniform spacing → no burst."""
+        """Uniform spacing â†’ no burst."""
         timestamps = [_BASE + timedelta(seconds=i * 10) for i in range(8)]
         sit = _situation_with_events(timestamps)
         assert not sit.is_bursting(burst_factor=3.0, recent_count=3)
@@ -148,7 +147,7 @@ class TestBurstDetection:
         """Slow start then rapid finish should trigger burst."""
         # First 5 events: 60s apart (slow)
         slow = [_BASE + timedelta(seconds=i * 60) for i in range(5)]
-        # Last 4 events: 2s apart (rapid) — burst_factor=3 should fire
+        # Last 4 events: 2s apart (rapid) â€” burst_factor=3 should fire
         fast_start = slow[-1] + timedelta(seconds=2)
         fast = [fast_start + timedelta(seconds=i * 2) for i in range(4)]
         sit = _situation_with_events(slow + fast)
@@ -160,17 +159,17 @@ class TestBurstDetection:
         fast_start = slow[-1] + timedelta(seconds=10)
         fast = [fast_start + timedelta(seconds=i * 10) for i in range(4)]
         sit = _situation_with_events(slow + fast)
-        # With factor=1.0 (any acceleration = burst) → might fire
-        # With factor=100.0 → effectively impossible
+        # With factor=1.0 (any acceleration = burst) â†’ might fire
+        # With factor=100.0 â†’ effectively impossible
         assert not sit.is_bursting(burst_factor=100.0, recent_count=3)
 
     def test_burst_returns_false_with_zero_overall_mean(self) -> None:
-        """All events at the exact same timestamp → no burst."""
+        """All events at the exact same timestamp â†’ no burst."""
         sit = _situation_with_events([_BASE] * 5)
         assert not sit.is_bursting(burst_factor=3.0, recent_count=3)
 
 
-# ── Quiet Detection Tests ───────────────────────────────────────────────────
+# â”€â”€ Quiet Detection Tests â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 
 class TestQuietDetection:
@@ -182,29 +181,49 @@ class TestQuietDetection:
         t1 = _BASE
         with _patched_now(t1):
             sit = _situation_with_events([t1])
-        # "Now" is the same as last event → not quiet
+        # "Now" is the same as last event â†’ not quiet
         with _patched_now(t1 + timedelta(seconds=30)):
             assert not sit.is_quiet(quiet_window=timedelta(minutes=5))
 
     def test_quiet_after_window_elapses(self) -> None:
-        t1 = _BASE
-        with _patched_now(t1):
-            sit = _situation_with_events([t1])
-        # 10 minutes later with 5-minute quiet window → quiet
-        with _patched_now(t1 + timedelta(minutes=10)):
-            assert sit.is_quiet(quiet_window=timedelta(minutes=5))
+        """Under SEPARATED, quiet arrives when event time advances, not wall time.
+
+        Rewritten for Level 2. The original advanced the host clock and asserted
+        quiet, which only holds under the D1 conflation. Event time now advances
+        because the shared replay clock observes a later signal elsewhere in the
+        stream.
+        """
+        clock = ReplayClock()
+        sit = Situation(clock=clock)
+        sit.attach_evidence(_signal_at(_BASE))
+        clock.observe(_BASE + timedelta(minutes=10))
+        assert sit.is_quiet(quiet_window=timedelta(minutes=5))
 
     def test_quiet_window_configurable(self) -> None:
-        t1 = _BASE
-        with _patched_now(t1):
-            sit = _situation_with_events([t1])
-        future = t1 + timedelta(minutes=3)
-        with _patched_now(future):
-            assert sit.is_quiet(quiet_window=timedelta(minutes=2))
+        clock = ReplayClock()
+        sit = Situation(clock=clock)
+        sit.attach_evidence(_signal_at(_BASE))
+        clock.observe(_BASE + timedelta(minutes=3))
+        assert sit.is_quiet(quiet_window=timedelta(minutes=2))
+        assert not sit.is_quiet(quiet_window=timedelta(minutes=5))
+
+    def test_wall_clock_advance_does_not_make_separated_quiet(self) -> None:
+        """Regression for D1. Host time moving must not affect event-time staleness."""
+        clock = ReplayClock()
+        sit = Situation(clock=clock)
+        sit.attach_evidence(_signal_at(_BASE))
+        with _patched_now(_BASE + timedelta(days=4000)):
             assert not sit.is_quiet(quiet_window=timedelta(minutes=5))
 
+    def test_conflated_mode_reproduces_the_defect(self) -> None:
+        """The original defect stays reachable for the Level 8 experiment."""
+        sit = Situation(clock_mode=ClockMode.CONFLATED)
+        sit.attach_evidence(_signal_at(_BASE))
+        with _patched_now(_BASE + timedelta(days=4000)):
+            assert sit.is_quiet(quiet_window=timedelta(minutes=5))
 
-# ── Temporal Snapshot Tests ──────────────────────────────────────────────────
+
+# â”€â”€ Temporal Snapshot Tests â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 
 class TestTemporalSnapshot:
@@ -242,13 +261,16 @@ class TestTemporalSnapshot:
         assert snap.burst_detected is True
 
     def test_snapshot_captures_quiet(self) -> None:
-        sit = _situation_with_events([_BASE])
-        with _patched_now(_BASE + timedelta(minutes=10)):
-            snap = sit.temporal_snapshot(quiet_window=timedelta(minutes=5))
+        clock = ReplayClock()
+        sit = Situation(clock=clock)
+        sit.attach_evidence(_signal_at(_BASE))
+        clock.observe(_BASE + timedelta(minutes=10))
+        snap = sit.temporal_snapshot(quiet_window=timedelta(minutes=5))
         assert snap.quiet_detected is True
+        assert snap.last_event_age_seconds == pytest.approx(600.0)
 
 
-# ── Store Temporal Summary Tests ─────────────────────────────────────────────
+# â”€â”€ Store Temporal Summary Tests â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 
 class TestTemporalSummary:
@@ -266,17 +288,15 @@ class TestTemporalSummary:
 
     @pytest.mark.asyncio
     async def test_summary_counts_quiet(self) -> None:
+        """A situation becomes quiet when the shared replay clock moves past it."""
         store = SituationStore(
             ttl=timedelta(minutes=30),
             dormancy_window=timedelta(minutes=10),
             quiet_window=timedelta(minutes=1),
         )
-        sig = _signal_at(_BASE)
-        with _patched_now(_BASE):
-            await store.ingest(sig)
-        # 2 minutes later — situation is quiet
-        with _patched_now(_BASE + timedelta(minutes=2)):
-            summary = await store.temporal_summary()
+        await store.ingest(_signal_at(_BASE))
+        store.clock.observe(_BASE + timedelta(minutes=2))
+        summary = await store.temporal_summary()
         assert summary.total_situations == 1
         assert summary.quiet_situations == 1
 

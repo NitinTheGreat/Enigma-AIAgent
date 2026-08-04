@@ -23,6 +23,7 @@ from uuid import UUID
 from enigma_reason.domain.signal import Signal
 from enigma_reason.domain.situation import Situation, SituationLifecycle
 from enigma_reason.domain.reasoning import Trend
+from enigma_reason.foundation.clock import Clock, ClockMode, make_clock
 from enigma_reason.store.correlation import (
     CorrelationKey,
     CorrelationStrategy,
@@ -140,6 +141,7 @@ class SituationStore:
         burst_recent_count: int = 3,
         quiet_window: timedelta = timedelta(minutes=5),
         reasoning_engine: object | None = None,
+        clock_mode: ClockMode | str = ClockMode.SEPARATED,
     ) -> None:
         if dormancy_window >= ttl:
             raise ValueError("dormancy_window must be shorter than ttl")
@@ -151,9 +153,28 @@ class SituationStore:
         self._burst_recent_count = burst_recent_count
         self._quiet_window = quiet_window
         self._reasoning_engine = reasoning_engine
+        self._clock_mode = ClockMode(clock_mode)
+        self._clock: Clock = make_clock(self._clock_mode)
         self._lock = asyncio.Lock()
         self._situations: dict[UUID, Situation] = {}
         self._key_index: dict[CorrelationKey, UUID] = {}
+
+    @property
+    def clock_mode(self) -> ClockMode:
+        """Return the time domain every situation in this store is built with."""
+        return self._clock_mode
+
+    @property
+    def clock(self) -> Clock:
+        """Return the clock shared by every situation in this store.
+
+        A single instance is deliberate. Under SEPARATED mode the clock is a
+        ReplayClock whose "now" is the newest event timestamp seen anywhere in
+        the stream. If each situation held its own clock then its now would
+        always equal its own newest event, staleness would always be zero and
+        no situation could ever be reported quiet.
+        """
+        return self._clock
 
     # ── Public API ───────────────────────────────────────────────────────
 
@@ -309,8 +330,7 @@ class SituationStore:
                 # Reactivate dormant situations — new evidence wakes them up
                 return existing
 
-        # Create a new situation
-        situation = Situation()
+        situation = Situation(clock=self._clock, clock_mode=self._clock_mode)
         self._situations[situation.situation_id] = situation
         self._key_index[key] = situation.situation_id
         logger.info("Created situation %s for key %s", situation.situation_id, key)

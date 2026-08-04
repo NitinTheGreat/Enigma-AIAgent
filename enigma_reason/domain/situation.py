@@ -18,11 +18,12 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 from enum import Enum
+from typing import Optional
 from uuid import UUID
 
 from enigma_reason.domain.signal import Signal
 from enigma_reason.domain.temporal import SituationTemporalSnapshot
-from enigma_reason.foundation.clock import utc_now
+from enigma_reason.foundation.clock import Clock, ClockMode, make_clock
 from enigma_reason.foundation.identifiers import new_id
 
 
@@ -40,24 +41,66 @@ class Situation:
     Thread-safety note:
         Individual Situation objects are mutated *only* while the caller
         holds the SituationStore lock.  They are not themselves locked.
+
+    Time domain note:
+        Staleness predicates read from an injected Clock and compare against a
+        reference timestamp chosen by clock_mode.  See foundation/clock.py and
+        paper/EVIDENCE.md section D1.
     """
 
-    __slots__ = ("situation_id", "created_at", "last_updated", "version", "_evidence")
+    __slots__ = (
+        "situation_id",
+        "created_at",
+        "last_updated",
+        "version",
+        "_evidence",
+        "_clock",
+        "_clock_mode",
+    )
 
-    def __init__(self, situation_id: UUID | None = None) -> None:
-        now = utc_now()
+    def __init__(
+        self,
+        situation_id: UUID | None = None,
+        clock: Optional[Clock] = None,
+        clock_mode: ClockMode | str = ClockMode.SEPARATED,
+    ) -> None:
+        """
+        Args:
+            situation_id: Explicit identifier, generated when omitted.
+            clock: Time source. Built from clock_mode when omitted.
+            clock_mode: Which time domain staleness predicates evaluate in.
+        """
+        self._clock_mode: ClockMode = ClockMode(clock_mode)
+        self._clock: Clock = clock if clock is not None else make_clock(self._clock_mode)
+        now = self._clock.now()
         self.situation_id: UUID = situation_id or new_id()
         self.created_at: datetime = now
         self.last_updated: datetime = now
         self.version: int = 1
         self._evidence: list[Signal] = []
 
+    @property
+    def clock_mode(self) -> ClockMode:
+        """Return the time domain this situation evaluates staleness in."""
+        return self._clock_mode
+
+    @property
+    def clock(self) -> Clock:
+        """Return the injected time source."""
+        return self._clock
+
     # ── Mutation ─────────────────────────────────────────────────────────
 
     def attach_evidence(self, signal: Signal) -> None:
-        """Append a signal to this situation's evidence, bump clock and version."""
+        """Append a signal to this situation's evidence, bump clock and version.
+
+        The clock observes the signal's event timestamp before the ingest
+        bookkeeping is updated, so a replay clock reports the newly observed
+        instant rather than the previous one.
+        """
         self._evidence.append(signal)
-        self.last_updated = utc_now()
+        self._clock.observe(signal.timestamp)
+        self.last_updated = self._clock.now()
         self.version += 1
 
     # ── Queries ──────────────────────────────────────────────────────────
@@ -77,7 +120,7 @@ class Situation:
         ttl: timedelta,
     ) -> SituationLifecycle:
         """Compute the current lifecycle state."""
-        elapsed = utc_now() - self.last_updated
+        elapsed = self._clock.now() - self.last_updated
         if elapsed > ttl:
             return SituationLifecycle.EXPIRED
         if elapsed > dormancy_window:
@@ -86,7 +129,7 @@ class Situation:
 
     def is_expired(self, ttl: timedelta) -> bool:
         """Return True if the situation has received no evidence within *ttl*."""
-        return (utc_now() - self.last_updated) > ttl
+        return (self._clock.now() - self.last_updated) > ttl
 
     def is_dormant(self, dormancy_window: timedelta, ttl: timedelta) -> bool:
         """Return True if dormant (inactive past window but not yet expired)."""
@@ -175,6 +218,33 @@ class Situation:
         # Burst = recent intervals are burst_factor times shorter than average
         return recent_mean < (overall_mean / burst_factor)
 
+    def _staleness_reference(self) -> Optional[datetime]:
+        """Return the timestamp staleness is measured from, per clock mode.
+
+        WALL measures from the ingest bookkeeping timestamp so that both sides
+        of the comparison come from the host clock. CONFLATED and SEPARATED both
+        measure from the newest event timestamp; they differ in what now() is.
+
+        Returns:
+            The reference instant, or None when there is no evidence.
+        """
+        if not self._evidence:
+            return None
+        if self._clock_mode is ClockMode.WALL:
+            return self.last_updated
+        return self.last_seen_at
+
+    def staleness(self) -> timedelta:
+        """Return elapsed time between now and the staleness reference.
+
+        Returns:
+            A zero duration when there is no evidence to be stale relative to.
+        """
+        reference = self._staleness_reference()
+        if reference is None:
+            return timedelta(0)
+        return self._clock.now() - reference
+
     def is_quiet(self, quiet_window: timedelta) -> bool:
         """True if no new events have arrived within the quiet window.
 
@@ -182,12 +252,11 @@ class Situation:
             quiet_window: Duration of inactivity that constitutes "quiet".
 
         This is a pure clock observation — no opinion on what "quiet" means.
+        Which clock, and which reference timestamp, is decided by clock_mode.
         """
         if not self._evidence:
             return True
-        last = self.last_seen_at
-        assert last is not None
-        return (utc_now() - last) > quiet_window
+        return self.staleness() > quiet_window
 
     def temporal_snapshot(
         self,
@@ -200,10 +269,7 @@ class Situation:
         mean_interval = (
             sum(intervals) / len(intervals) if intervals else None
         )
-        last_seen = self.last_seen_at
-        last_event_age = (
-            (utc_now() - last_seen).total_seconds() if last_seen else 0.0
-        )
+        last_event_age = self.staleness().total_seconds()
 
         return SituationTemporalSnapshot(
             situation_id=str(self.situation_id),
@@ -218,19 +284,49 @@ class Situation:
 
     # ── Summary ──────────────────────────────────────────────────────────
 
-    def summary(self) -> dict:
-        """Lightweight summary suitable for acknowledgements and logging.
+    def summary(
+        self,
+        dormancy_window: Optional[timedelta] = None,
+        ttl: Optional[timedelta] = None,
+    ) -> dict:
+        """Lightweight summary suitable for acknowledgements and dashboards.
 
-        Contains no decisions, scores, or intelligence — just structural facts.
+        Contains no decisions or intelligence, only structural facts derived
+        from the evidence already attached.
+
+        Args:
+            dormancy_window: Supplied to report a lifecycle label. Omitting it
+                omits the label rather than guessing a window.
+            ttl: Supplied alongside dormancy_window for the same reason.
+
+        Returns:
+            A JSON-serialisable dict. The max_anomaly, sources, last_activity
+            and lifecycle keys exist because the dashboard reads them; see
+            paper/EVIDENCE.md section F1.
         """
+        anomaly_scores = [signal.anomaly_score for signal in self._evidence]
+        lifecycle = None
+        if dormancy_window is not None and ttl is not None:
+            lifecycle = self.lifecycle_state(dormancy_window, ttl).value
+
         return {
             "situation_id": str(self.situation_id),
             "created_at": self.created_at.isoformat(),
             "last_updated": self.last_updated.isoformat(),
+            "last_activity": self.last_updated.isoformat(),
+            "lifecycle": lifecycle,
             "version": self.version,
             "evidence_count": self.evidence_count,
             "signal_types": list({s.signal_type.value for s in self._evidence}),
             "entities": list({str(s.entity) for s in self._evidence if s.entity}),
+            "sources": list({s.source for s in self._evidence}),
+            "abstained_evidence_count": sum(
+                1 for signal in self._evidence if signal.abstained
+            ),
+            "max_anomaly": max(anomaly_scores) if anomaly_scores else 0.0,
+            "mean_anomaly": (
+                sum(anomaly_scores) / len(anomaly_scores) if anomaly_scores else 0.0
+            ),
         }
 
     # ── Dunder ───────────────────────────────────────────────────────────
@@ -240,5 +336,5 @@ class Situation:
             f"Situation(id={self.situation_id!s}, "
             f"v={self.version}, "
             f"evidence={self.evidence_count}, "
-            f"age={utc_now() - self.created_at})"
+            f"age={self._clock.now() - self.created_at})"
         )
