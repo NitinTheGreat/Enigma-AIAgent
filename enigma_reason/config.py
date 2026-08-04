@@ -23,6 +23,15 @@ class Settings(BaseSettings):
     app_name: str = "enigma-reason"
     debug: bool = False
     log_level: str = "INFO"
+
+    # ENIGMA_CORS_ORIGINS. The dashboard fetches /health from the browser, so
+    # without this the footer renders dashes for data that exists. Documented in
+    # .env.example since Phase 1 but never implemented, recorded as E8 in
+    # paper/EVIDENCE.md.
+    cors_origins: list[str] = [
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    ]
     situation_ttl_minutes: int = 30
     situation_dormancy_minutes: int = 10
 

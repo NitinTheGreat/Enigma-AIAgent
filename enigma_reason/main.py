@@ -10,6 +10,7 @@ import logging
 from datetime import timedelta
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from enigma_reason.adapters.auth import AuthAnomalyAdapter
 from enigma_reason.adapters.network import NetworkAnomalyAdapter
@@ -98,6 +99,14 @@ app = FastAPI(
     title=settings.app_name,
     description="Situation Memory, Temporal Awareness, Adapters & Reasoning",
     version="0.7.0",
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.cors_origins,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["*"],
 )
 
 # ── Routes ───────────────────────────────────────────────────────────────────
