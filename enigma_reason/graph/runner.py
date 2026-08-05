@@ -23,6 +23,7 @@ from enigma_reason.domain.situation import Situation
 from enigma_reason.domain.temporal import SituationTemporalSnapshot
 from enigma_reason.graph.builder import EpistemicControls, build_reasoning_graph
 from enigma_reason.graph.state import ReasoningState
+from enigma_reason.observability.run_log import IterationRecorder, RecordSink
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +63,49 @@ def controls_from_settings() -> EpistemicControls:
     )
 
 
+def _invoke_with_run_log(
+    compiled_graph,
+    initial_state: ReasoningState,
+    situation: Situation,
+    run_log: RecordSink,
+    run_id: str | None,
+) -> dict[str, Any]:
+    """Drive the graph by its value stream so each iteration can be recorded.
+
+    LangGraph implements invoke over the same value stream this consumes, and
+    the last value the stream yields is the state invoke would have returned.
+    Observing here therefore leaves the reasoning path untouched: no node is
+    modified, no node is aware of the recorder, and nothing the recorder does
+    is visible to the graph. tests/test_level6_instrumentation.py asserts the
+    two paths produce identical final states.
+
+    A recorder failure must not fail an analysis, so the stream is drained
+    inside a guard that falls back to the last state seen.
+    """
+    recorder = IterationRecorder(
+        run_log,
+        run_id=run_id,
+        situation_id=str(situation.situation_id),
+        clock_mode=situation.clock_mode.value,
+        event_timestamp=situation.last_seen_at,
+    )
+
+    final_state: dict[str, Any] = dict(initial_state)
+    for state in compiled_graph.stream(initial_state, stream_mode="values"):
+        final_state = state
+        try:
+            recorder.observe(state)
+        except Exception as exc:
+            logger.error("Run log observation failed, continuing: %s", exc)
+
+    try:
+        recorder.finalise(final_state)
+    except Exception as exc:
+        logger.error("Run log finalisation failed, continuing: %s", exc)
+
+    return final_state
+
+
 def run_reasoning(
     situation: Situation,
     temporal: SituationTemporalSnapshot,
@@ -72,6 +116,8 @@ def run_reasoning(
     convergence_threshold: float | None = None,
     convergence_persistence: int | None = None,
     controls: EpistemicControls | None = None,
+    run_log: RecordSink | None = None,
+    run_id: str | None = None,
 ) -> dict[str, Any]:
     """Invoke the reasoning graph for a given situation.
 
@@ -85,6 +131,10 @@ def run_reasoning(
         convergence_persistence: Override required dominant iterations.
         controls: Override the epistemic control set. Defaults to the values in
             settings, which Level 9 varies through environment variables.
+        run_log: Optional sink receiving one record per reasoning iteration.
+            When present the graph is driven by its value stream rather than by
+            invoke, which observes the same execution without altering it.
+        run_id: Identifier tying this analysis to the experiment that ran it.
 
     Returns:
         Final ReasoningState dict with hypotheses, convergence_score and the
@@ -124,7 +174,13 @@ def run_reasoning(
         active_controls.as_dict(),
     )
 
-    final_state = compiled_graph.invoke(initial_state)
+    if run_log is None:
+        final_state = compiled_graph.invoke(initial_state)
+    else:
+        final_state = _invoke_with_run_log(
+            compiled_graph, initial_state, situation, run_log, run_id
+        )
+
     final_state["epistemic_controls"] = active_controls.as_dict()
     final_state["clock_mode"] = situation.clock_mode.value
 

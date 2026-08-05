@@ -81,6 +81,20 @@ class Settings(BaseSettings):
     # P: the sustained dominance requirement before convergence is permitted.
     persistence_required: bool = True
 
+    # ── Level 6: instrumentation and backpressure ────────────────────────
+    # ENIGMA_ANALYSIS_MAX_CONCURRENT bounds the fan out that section C4 of
+    # paper/EVIDENCE.md records as unbounded. Four matches the number of
+    # analyses that can hold a thread pool slot without starving the loop.
+    analysis_max_concurrent: int = 4
+    # ENIGMA_ANALYSIS_MAX_PENDING bounds the backlog. Beyond this, submissions
+    # are shed and counted, so oversubscription is measurable rather than
+    # silent. An analysis of a situation that has since moved on has no value.
+    analysis_max_pending: int = 64
+    # ENIGMA_RUN_LOG_PATH enables per iteration logging on the live server.
+    # Empty disables it, which is the default because the live server is a
+    # demonstration surface and the experiments run offline.
+    run_log_path: str = ""
+
     # Belief inertia cap. 0.15 matches the largest single adjustment the
     # evaluation node can apply in one pass, which is the 0.1 anomaly boost
     # plus the 0.05 trend boost. A cap below that would suppress a legitimate

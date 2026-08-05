@@ -56,6 +56,7 @@ class Situation:
         "_evidence",
         "_clock",
         "_clock_mode",
+        "_intervals_cache",
     )
 
     def __init__(
@@ -78,6 +79,7 @@ class Situation:
         self.last_updated: datetime = now
         self.version: int = 1
         self._evidence: list[Signal] = []
+        self._intervals_cache: tuple[int, list[float]] | None = None
 
     @property
     def clock_mode(self) -> ClockMode:
@@ -168,14 +170,27 @@ class Situation:
 
         Events are sorted by their signal timestamp.
         Returns an empty list if fewer than 2 events.
+
+        The result is memoised against the version counter, which advances on
+        every attach and so invalidates the cache exactly when the evidence
+        changes. Section C4 of paper/EVIDENCE.md records that this sort ran at
+        least three times per analysis over an evidence list that is never
+        trimmed, in a path executed once per arriving signal. Memoising leaves
+        the asymptotic cost unchanged but removes the repeats within a single
+        analysis, which is where the constant factor was.
         """
         if len(self._evidence) < 2:
             return []
+        cached = self._intervals_cache
+        if cached is not None and cached[0] == self.version:
+            return list(cached[1])
         timestamps = sorted(s.timestamp for s in self._evidence)
-        return [
+        intervals = [
             (timestamps[i + 1] - timestamps[i]).total_seconds()
             for i in range(len(timestamps) - 1)
         ]
+        self._intervals_cache = (self.version, intervals)
+        return list(intervals)
 
     @property
     def event_rate(self) -> float:

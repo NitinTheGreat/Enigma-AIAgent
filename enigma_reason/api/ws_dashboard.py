@@ -17,6 +17,7 @@ import asyncio
 import json
 import logging
 from datetime import timedelta
+from functools import partial
 from typing import Any
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
@@ -26,6 +27,8 @@ from enigma_reason.domain.situation import Situation
 from enigma_reason.explain.builder import build_explanation
 from enigma_reason.explain.formatter import ExplanationFormatter
 from enigma_reason.graph.runner import run_reasoning
+from enigma_reason.observability.latency import LatencyRecorder, Stage
+from enigma_reason.observability.run_log import RecordSink
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +44,8 @@ class DashboardManager:
         quiet_window: timedelta = timedelta(minutes=5),
         dormancy_window: timedelta = timedelta(minutes=10),
         ttl: timedelta = timedelta(minutes=30),
+        latency: LatencyRecorder | None = None,
+        run_log: RecordSink | None = None,
     ) -> None:
         """
         Args:
@@ -51,8 +56,14 @@ class DashboardManager:
             dormancy_window: Passed through to Situation.summary so the payload
                 carries a lifecycle label the dashboard can render.
             ttl: Passed through to Situation.summary alongside dormancy_window.
+            latency: Recorder for the four stages this class owns. One is
+                created when omitted so the attribute is always present.
+            run_log: Optional per iteration sink, off by default on the live
+                server because the experiments run offline.
         """
         self._reasoning_engine = reasoning_engine
+        self.latency = latency or LatencyRecorder()
+        self._run_log = run_log
         self._burst_factor = burst_factor
         self._burst_recent_count = burst_recent_count
         self._quiet_window = quiet_window
@@ -90,7 +101,8 @@ class DashboardManager:
 
         try:
             payload = await self._build_analysis(situation)
-            await self._broadcast(payload)
+            with self.latency.measure(Stage.BROADCAST):
+                await self._broadcast(payload)
         except Exception as exc:
             logger.error("Dashboard analysis/broadcast failed: %s", exc, exc_info=True)
 
@@ -98,21 +110,28 @@ class DashboardManager:
         """Run the full analysis pipeline for a situation."""
 
         # Phase 2: Temporal snapshot
-        temporal = situation.temporal_snapshot(
-            burst_factor=self._burst_factor,
-            recent_count=self._burst_recent_count,
-            quiet_window=self._quiet_window,
-        )
-
         # Phase 4: Deterministic reasoning
-        reasoning = self._reasoning_engine.evaluate(situation)
+        with self.latency.measure(Stage.DETERMINISTIC):
+            temporal = situation.temporal_snapshot(
+                burst_factor=self._burst_factor,
+                recent_count=self._burst_recent_count,
+                quiet_window=self._quiet_window,
+            )
+            reasoning = self._reasoning_engine.evaluate(situation)
 
         # Phase 5: LangGraph reasoning (runs Gemini — offloaded to thread
         # pool so we don't block the event loop and starve other WebSockets)
         try:
-            final_state = await asyncio.to_thread(
-                run_reasoning, situation, temporal, reasoning
-            )
+            with self.latency.measure(Stage.LANGGRAPH):
+                final_state = await asyncio.to_thread(
+                    partial(
+                        run_reasoning,
+                        situation,
+                        temporal,
+                        reasoning,
+                        run_log=self._run_log,
+                    )
+                )
         except Exception as exc:
             logger.warning("LangGraph reasoning failed, using fallback: %s", exc)
             final_state = {
@@ -126,8 +145,9 @@ class DashboardManager:
             }
 
         # Phase 6: Build explanation
-        explanation = build_explanation(final_state, reasoning, temporal)
-        human_text = ExplanationFormatter.format_plain(explanation)
+        with self.latency.measure(Stage.EXPLANATION):
+            explanation = build_explanation(final_state, reasoning, temporal)
+            human_text = ExplanationFormatter.format_plain(explanation)
 
         return {
             "type": "situation_analysis",

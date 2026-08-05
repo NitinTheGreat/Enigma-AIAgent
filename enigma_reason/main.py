@@ -12,6 +12,9 @@ from datetime import timedelta
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from enigma_reason.observability.backpressure import AnalysisPool
+from enigma_reason.observability.latency import LatencyRecorder
+from enigma_reason.observability.run_log import RunLogWriter
 from enigma_reason.adapters.auth import AuthAnomalyAdapter
 from enigma_reason.adapters.network import NetworkAnomalyAdapter
 from enigma_reason.adapters.registry import AdapterRegistry
@@ -82,6 +85,16 @@ registry.register(NetworkAnomalyAdapter())
 registry.register(AuthAnomalyAdapter())
 registry.register(VideoDetectionAdapter())
 
+# ── Instrumentation ──────────────────────────────────────────────────────────
+
+latency = LatencyRecorder()
+analysis_pool = AnalysisPool(
+    max_concurrent=settings.analysis_max_concurrent,
+    max_pending=settings.analysis_max_pending,
+    latency_recorder=latency,
+)
+run_log = RunLogWriter(settings.run_log_path) if settings.run_log_path else None
+
 # ── Dashboard Manager ────────────────────────────────────────────────────────
 
 dashboard = DashboardManager(
@@ -91,6 +104,8 @@ dashboard = DashboardManager(
     quiet_window=timedelta(minutes=settings.quiet_window_minutes),
     dormancy_window=timedelta(minutes=settings.situation_dormancy_minutes),
     ttl=timedelta(minutes=settings.situation_ttl_minutes),
+    latency=latency,
+    run_log=run_log,
 )
 
 # ── App ──────────────────────────────────────────────────────────────────────
@@ -111,7 +126,13 @@ app.add_middleware(
 
 # ── Routes ───────────────────────────────────────────────────────────────────
 
-app.include_router(create_signal_router(store, dashboard_manager=dashboard, adapter_registry=registry))
+app.include_router(create_signal_router(
+    store,
+    dashboard_manager=dashboard,
+    adapter_registry=registry,
+    analysis_pool=analysis_pool,
+    latency=latency,
+))
 app.include_router(create_raw_signal_router(store, registry, dashboard_manager=dashboard))
 app.include_router(create_dashboard_router(dashboard))
 app.include_router(create_analyze_router(
@@ -145,4 +166,31 @@ async def health() -> dict:
         "adapters": registry.stats,
         "total_adapted": registry.total_accepted,
         "total_rejected": registry.total_rejected,
+    }
+
+
+# ── Metrics ──────────────────────────────────────────────────────────────────
+
+@app.get("/metrics")
+async def metrics() -> dict:
+    """Expose per stage latency and the analysis backlog.
+
+    Section C1 of paper/EVIDENCE.md records that no endpoint reported timing,
+    queue depth or throughput, so the only latency figure anywhere was a
+    browser round trip to a counter endpoint. This is the replacement.
+
+    Stage timings are reported separately rather than summed, because the
+    language model call dominates the other five by one to two orders of
+    magnitude and an aggregate would conceal that.
+    """
+    return {
+        "latency_ms": latency.summary(),
+        "analysis_pool": analysis_pool.snapshot().to_dict(),
+        "run_log": (
+            {"path": settings.run_log_path, "written": run_log.written,
+             "dropped": run_log.dropped}
+            if run_log is not None
+            else {"enabled": False}
+        ),
+        "dashboard_clients": dashboard.client_count,
     }
