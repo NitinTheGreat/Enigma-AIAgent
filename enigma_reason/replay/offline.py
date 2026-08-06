@@ -279,6 +279,7 @@ class OfflineReplay:
         correlation: CorrelationStrategy | None = None,
         latency: LatencyRecorder | None = None,
         max_iterations: int | None = None,
+        on_analysis: Callable[[Situation, dict[str, Any]], None] | None = None,
     ) -> None:
         self.llm_factory = llm_factory
         self.run_log = run_log
@@ -287,6 +288,7 @@ class OfflineReplay:
         self.seed = seed
         self.analyse_every = max(1, analyse_every)
         self.max_iterations = max_iterations
+        self.on_analysis = on_analysis
         self.latency = latency or LatencyRecorder()
         self.engine = ReasoningEngine()
         self.store = SituationStore(
@@ -320,9 +322,21 @@ class OfflineReplay:
         result.situations_created = len(self.store._situations)
         result.latency = self.latency.summary()
         result.iterations_logged = getattr(self.run_log, "written", 0)
-        model = self.llm_factory()
-        result.llm_calls = getattr(model, "calls", 0)
+        result.llm_calls = self._model_call_count()
         return result
+
+    def _model_call_count(self) -> int:
+        """Report how many model calls were made, tolerating a failing factory.
+
+        A factory that raises is a legitimate configuration: it is what an
+        absent API key produces, and the generation node is built to fall back
+        rather than fail. Reading a call count off it must not turn that
+        supported path into a crash.
+        """
+        try:
+            return getattr(self.llm_factory(), "calls", 0)
+        except Exception:
+            return 0
 
     def _ingest(self, signal: Signal) -> Situation:
         """Attach one signal, bypassing the async lock the live path needs.
@@ -356,6 +370,9 @@ class OfflineReplay:
 
         with self.latency.measure(Stage.EXPLANATION):
             build_explanation(final_state, reasoning, temporal)
+
+        if self.on_analysis is not None:
+            self.on_analysis(situation, final_state)
 
     def iter_situations(self) -> Iterator[Situation]:
         """Yield every situation the replay created."""
