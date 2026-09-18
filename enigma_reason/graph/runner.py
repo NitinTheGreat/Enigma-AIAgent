@@ -32,11 +32,15 @@ def _default_llm_factory():
     """Create a Gemini Flash instance from environment config."""
     from langchain_google_genai import ChatGoogleGenerativeAI
 
-    api_key = os.environ.get("GOOGLE_API_KEY") or os.environ.get("ENIGMA_GEMINI_API_KEY")
+    api_key = (
+        os.environ.get("GOOGLE_API_KEY")
+        or os.environ.get("ENIGMA_GEMINI_API_KEY")
+        or os.environ.get("GEMINI_API_KEY")
+    )
     if not api_key:
         raise RuntimeError(
-            "Gemini API key not found. Set GOOGLE_API_KEY or ENIGMA_GEMINI_API_KEY "
-            "in your environment variables."
+            "Gemini API key not found. Set GOOGLE_API_KEY, ENIGMA_GEMINI_API_KEY "
+            "or GEMINI_API_KEY in your environment variables."
         )
 
     return ChatGoogleGenerativeAI(
