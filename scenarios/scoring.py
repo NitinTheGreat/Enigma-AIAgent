@@ -103,6 +103,8 @@ def load_run_log(path: str | Path) -> dict[str, list[dict[str, Any]]]:
             if not line:
                 continue
             record = json.loads(line)
+            if record.get("record_type") == "retry":
+                continue
             grouped.setdefault(record["situation_id"], []).append(record)
     for records in grouped.values():
         records.sort(key=lambda r: r["iteration"])

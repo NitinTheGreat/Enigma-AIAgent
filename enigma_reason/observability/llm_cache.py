@@ -73,6 +73,7 @@ class CacheStats:
     misses: int = 0
     writes: int = 0
     errors: int = 0
+    coalesced: int = 0
 
     @property
     def lookups(self) -> int:
@@ -119,6 +120,7 @@ class ResponseCache:
         self.stats = CacheStats()
         self._entries: dict[str, str] = {}
         self._lock = threading.Lock()
+        self._key_locks: dict[str, threading.Lock] = {}
         self._load()
 
     def _load(self) -> None:
@@ -159,6 +161,39 @@ class ResponseCache:
                 self.stats.hits += 1
         return value
 
+    def peek(self, prompt: str) -> str | None:
+        """Return a cached response without counting a hit or a miss.
+
+        The single flight path re-checks the store after taking a key lock,
+        and that re-check must not be counted again: the first lookup already
+        recorded the miss that sent this caller to the model.
+        """
+        key = prompt_key(prompt, self.model)
+        with self._lock:
+            return self._entries.get(key)
+
+    def key_lock(self, prompt: str) -> threading.Lock:
+        """Return the lock guarding one prompt's fill.
+
+        Without this, two workers that miss the same prompt at the same moment
+        both call the model and pay twice for one answer. The store itself was
+        already safe; the waste was not.
+        """
+        key = prompt_key(prompt, self.model)
+        with self._lock:
+            lock = self._key_locks.get(key)
+            if lock is None:
+                lock = threading.Lock()
+                self._key_locks[key] = lock
+            return lock
+
+    def note_coalesced(self) -> None:
+        """Record that a caller was served by another caller's fill."""
+        with self._lock:
+            self.stats.coalesced += 1
+            self.stats.hits += 1
+            self.stats.misses -= 1
+
     def put(self, prompt: str, response: str) -> None:
         """Store a response against its prompt."""
         key = prompt_key(prompt, self.model)
@@ -179,14 +214,25 @@ class _CachingModel:
         self._cache = cache
 
     def invoke(self, prompt: str) -> CachedResponse:
-        """Return a cached response when the prompt has been seen before."""
+        """Return a cached response when the prompt has been seen before.
+
+        On a miss the fill is single flighted under a per prompt lock, so
+        concurrent callers asking the identical question produce one model
+        call rather than one each.
+        """
         cached = self._cache.get(prompt)
         if cached is not None:
             return CachedResponse(content=cached)
-        response = self._inner.invoke(prompt)
-        text = response.content if hasattr(response, "content") else str(response)
-        self._cache.put(prompt, text)
-        return CachedResponse(content=text)
+
+        with self._cache.key_lock(prompt):
+            filled = self._cache.peek(prompt)
+            if filled is not None:
+                self._cache.note_coalesced()
+                return CachedResponse(content=filled)
+            response = self._inner.invoke(prompt)
+            text = response.content if hasattr(response, "content") else str(response)
+            self._cache.put(prompt, text)
+            return CachedResponse(content=text)
 
 
 class CachingLLMFactory:
