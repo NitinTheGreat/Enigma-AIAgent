@@ -36,7 +36,7 @@ from typing import Any, Callable, Iterable, Sequence
 
 logger = logging.getLogger(__name__)
 
-RATE_LIMIT_MARKERS = (
+TRANSIENT_MARKERS = (
     "429",
     "rate limit",
     "resource_exhausted",
@@ -45,19 +45,37 @@ RATE_LIMIT_MARKERS = (
     "too many requests",
     "overloaded",
     "503",
+    "502",
+    "504",
+    "server disconnected",
+    "connection reset",
+    "connection aborted",
+    "connection error",
+    "remote end closed",
+    "timed out",
+    "timeout",
+    "temporarily unavailable",
+    "service unavailable",
+    "incomplete read",
+    "broken pipe",
 )
 
 
-def looks_rate_limited(error: BaseException) -> bool:
-    """Return whether an exception reads as throttling rather than a bug.
+def looks_transient(error: BaseException) -> bool:
+    """Return whether an exception reads as a transient fault rather than a bug.
 
     The Gemini client raises a family of types and wraps some of them, so the
     reliable signal is the rendered message rather than the class. A false
-    positive costs one needless retry; a false negative aborts a run that only
-    needed to wait.
+    positive costs one needless retry; a false negative is far worse than that
+    and was measured: a dropped connection that this predicate did not
+    recognise fell straight through to the fixed fallback hypotheses at
+    nodes.py:200-202, which the generation node substitutes silently, so the
+    run carried three invented hypotheses and nothing in its own output said
+    so. Throttling and a dropped connection both mean try again, so both are
+    named here.
     """
     text = f"{type(error).__name__} {error}".lower()
-    return any(marker in text for marker in RATE_LIMIT_MARKERS)
+    return any(marker in text for marker in TRANSIENT_MARKERS)
 
 
 @dataclass
@@ -141,7 +159,7 @@ class RetryingModel:
             try:
                 return self._inner.invoke(prompt)
             except BaseException as exc:
-                if not looks_rate_limited(exc) or attempt == self._attempts:
+                if not looks_transient(exc) or attempt == self._attempts:
                     raise
                 last = exc
                 delay = min(self._base_delay * (2 ** (attempt - 1)), self._max_delay)

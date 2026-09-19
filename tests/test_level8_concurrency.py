@@ -22,7 +22,7 @@ from enigma_reason.replay.concurrent import (
     ConcurrentReplay,
     RetryingModel,
     analysis_keys,
-    looks_rate_limited,
+    looks_transient,
 )
 
 
@@ -152,20 +152,29 @@ def test_persisted_cache_round_trips_after_concurrent_fill(tmp_path: Path):
         "RESOURCE_EXHAUSTED: quota exceeded",
         "The model is overloaded",
         "503 Service Unavailable",
+        "Server disconnected without sending a response.",
+        "Connection reset by peer",
+        "Remote end closed connection without response",
+        "Read timed out",
+        "502 Bad Gateway",
     ],
 )
-def test_throttling_messages_are_recognised(message: str):
-    """Every shape of throttling the client raises must be retried."""
-    assert looks_rate_limited(RuntimeError(message))
+def test_transient_messages_are_recognised(message: str):
+    """Every shape of transient fault the client raises must be retried.
+
+    The connection cases are here because one of them was not recognised in
+    the Level 8 run and cost 25 iterations to the silent fallback path.
+    """
+    assert looks_transient(RuntimeError(message))
 
 
 @pytest.mark.parametrize(
     "message",
     ["invalid api key", "malformed request", "TypeError: bad argument"],
 )
-def test_non_throttling_errors_are_not_retried(message: str):
+def test_genuine_faults_are_not_retried(message: str):
     """A genuine fault must surface rather than be retried into silence."""
-    assert not looks_rate_limited(RuntimeError(message))
+    assert not looks_transient(RuntimeError(message))
 
 
 def test_retry_succeeds_after_throttling_and_records_each_attempt():
