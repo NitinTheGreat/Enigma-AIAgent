@@ -34,6 +34,7 @@ from statistics import mean
 from typing import Any, Iterable
 
 from scenarios.generator import (
+    CATEGORIES_BY_NAME,
     UNKNOWN_CONCLUSION,
     Regime,
     Scenario,
@@ -123,11 +124,28 @@ def _matches(text: str, keywords: Iterable[str]) -> bool:
     return any(keyword.lower() in lowered for keyword in keywords)
 
 
+def _categories_for_keywords(keywords: Iterable[str]) -> tuple[str, ...]:
+    """Return the category names whose keyword lists the given keywords are.
+
+    Ground truth records a rival by its keyword list rather than its name, so
+    the semantic path has to recover the name to look up its narrative.
+    """
+    wanted = set(keywords)
+    if not wanted:
+        return ()
+    return tuple(
+        category.name
+        for category in CATEGORIES_BY_NAME.values()
+        if wanted & set(category.keywords)
+    )
+
+
 def score_situation(
     situation_id: str,
     records: list[dict[str, Any]],
     scenario: Scenario,
     descriptions: dict[str, str],
+    matcher: Any | None = None,
 ) -> SituationOutcome:
     """Score one situation against the ground truth of its scenario.
 
@@ -137,6 +155,9 @@ def score_situation(
         scenario: The scenario whose signals produced it.
         descriptions: Map from hypothesis text hash to the text it stands for,
             recovered from the run itself, because the log stores digests.
+        matcher: Optional semantic matcher. When absent the keyword scorer is
+            used, which remains the validated one. An EmbeddingMatcher can be
+            passed to reproduce the rejected semantic result recorded in L7.9.
 
     Returns:
         What the system concluded and whether that was right.
@@ -152,8 +173,16 @@ def score_situation(
     text_hash = leader.get("text_hash") if leader else None
     text = descriptions.get(text_hash, "") if text_hash else ""
 
-    matched_expected = concluded and _matches(text, truth.conclusion_keywords)
-    matched_competitor = concluded and _matches(text, truth.competing_keywords)
+    if matcher is None:
+        matched_expected = concluded and _matches(text, truth.conclusion_keywords)
+        matched_competitor = concluded and _matches(text, truth.competing_keywords)
+    else:
+        expected = truth.expected_conclusion
+        rivals = _categories_for_keywords(truth.competing_keywords)
+        matched_expected = concluded and matcher.matches_category(
+            text, expected, rivals
+        )
+        matched_competitor = concluded and matcher.matches_any(text, rivals)
 
     if truth.should_conclude:
         correct = concluded and matched_expected and not matched_competitor
@@ -246,6 +275,7 @@ def score_run(
     scenarios: list[Scenario],
     situation_entities: dict[str, str],
     descriptions: dict[str, str],
+    matcher: Any | None = None,
 ) -> tuple[list[SituationOutcome], OutcomeMetrics, dict[str, OutcomeMetrics]]:
     """Score a whole validation run.
 
@@ -273,7 +303,7 @@ def score_run(
         if scenario is None:
             continue
         outcomes.append(
-            score_situation(situation_id, records, scenario, descriptions)
+            score_situation(situation_id, records, scenario, descriptions, matcher)
         )
 
     per_regime = {
