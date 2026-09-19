@@ -290,7 +290,7 @@ class OfflineReplay:
         self.max_iterations = max_iterations
         self.on_analysis = on_analysis
         self.latency = latency or LatencyRecorder()
-        self.engine = ReasoningEngine()
+        self.engine = ReasoningEngine(clock_mode=self.clock_mode)
         self.store = SituationStore(
             correlation=correlation,
             reasoning_engine=self.engine,
