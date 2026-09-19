@@ -279,6 +279,7 @@ class OfflineReplay:
         correlation: CorrelationStrategy | None = None,
         latency: LatencyRecorder | None = None,
         max_iterations: int | None = None,
+        convergence_threshold: float | None = None,
         on_analysis: Callable[[Situation, dict[str, Any]], None] | None = None,
     ) -> None:
         self.llm_factory = llm_factory
@@ -288,6 +289,7 @@ class OfflineReplay:
         self.seed = seed
         self.analyse_every = max(1, analyse_every)
         self.max_iterations = max_iterations
+        self.convergence_threshold = convergence_threshold
         self.on_analysis = on_analysis
         self.latency = latency or LatencyRecorder()
         self.engine = ReasoningEngine(clock_mode=self.clock_mode)
@@ -366,6 +368,7 @@ class OfflineReplay:
                 run_log=self.run_log,
                 run_id=self.run_id,
                 max_iterations=self.max_iterations,
+                convergence_threshold=self.convergence_threshold,
             )
 
         with self.latency.measure(Stage.EXPLANATION):
