@@ -46,6 +46,13 @@ class EpistemicControls:
 
     Level 9 runs a 2^4 factorial over the four booleans. Each False value must
     remove the mechanism from the reasoning path entirely.
+
+    stable_hypothesis_identity is not one of the four. It is the Level 10
+    repair, and it defaults to False so that every result from Levels 2
+    through 9 is reproduced unchanged. When True, a newly generated
+    hypothesis that continues a prior one inherits its identity, which is the
+    precondition the persistence mechanism was written assuming and which L9
+    showed never holds.
     """
 
     unknown_hypothesis_enabled: bool = True
@@ -53,6 +60,7 @@ class EpistemicControls:
     asymmetric_decay_enabled: bool = True
     persistence_required: bool = True
     max_confidence_delta: float = 0.15
+    stable_hypothesis_identity: bool = False
 
     @property
     def inertia_enabled(self) -> bool:
@@ -68,6 +76,7 @@ class EpistemicControls:
             "persistence_required": self.persistence_required,
             "max_confidence_delta": self.max_confidence_delta,
             "inertia_enabled": self.inertia_enabled,
+            "stable_hypothesis_identity": self.stable_hypothesis_identity,
         }
 
 
@@ -92,7 +101,9 @@ def build_reasoning_graph(
     graph.add_node(
         "generate_hypotheses",
         make_generate_hypotheses(
-            llm_factory, unknown_enabled=active.unknown_hypothesis_enabled
+            llm_factory,
+            unknown_enabled=active.unknown_hypothesis_enabled,
+            stable_identity=active.stable_hypothesis_identity,
         ),
     )
     if active.sanity_gate_enabled:

@@ -22,6 +22,8 @@ from __future__ import annotations
 
 import json
 import logging
+import re
+from difflib import SequenceMatcher
 from typing import Any, Callable
 from uuid import uuid4
 
@@ -150,6 +152,82 @@ def _build_existing_hypothesis_context(hypotheses: list[dict]) -> str:
     return "\n".join(lines)
 
 
+IDENTITY_MATCH_THRESHOLD = 0.70
+_IDENTITY_WORD = re.compile(r"[^a-z0-9]+")
+
+
+def _normalise_for_identity(text: str) -> str:
+    """Lowercase, strip punctuation to spaces, collapse whitespace."""
+    return " ".join(_IDENTITY_WORD.sub(" ", str(text).lower()).split())
+
+
+def _identity_similarity(left: str, right: str) -> float:
+    """Return the normalised text similarity of two hypothesis descriptions."""
+    return SequenceMatcher(
+        None, _normalise_for_identity(left), _normalise_for_identity(right)
+    ).ratio()
+
+
+def _inherit_identity(fresh: list[dict], prior: list[dict]) -> int:
+    """Give each new hypothesis the identity of the prior one it continues.
+
+    The Level 10 repair. Generation replaces the hypothesis list every
+    iteration and each new entry receives a fresh uuid, so dominant_iterations
+    restarts at zero and a persistence requirement of two can never be met.
+    This matches a new hypothesis to the prior one it restates and lets it
+    inherit that identity and its dominant_iterations count.
+
+    Only the identifier and the counter are inherited. The description and the
+    confidence stay exactly as the model produced them, so the prompt the next
+    iteration assembles is byte identical to the one an unrepaired run would
+    assemble and the response cache serves it unchanged.
+
+    The rule and its threshold were fixed before the repair was run, by
+    calibration against Level 9 output recorded in
+    results/repair/matcher_calibration_seed42.json. Matching is greedy and one
+    to one in descending similarity, so no prior identity is handed to two
+    successors.
+
+    Returns:
+        How many hypotheses inherited an identity.
+    """
+    candidates = [
+        h
+        for h in prior
+        if h.get("status") == "active" and h.get("hypothesis_id") != UNKNOWN_HYPOTHESIS_ID
+    ]
+    targets = [h for h in fresh if h.get("hypothesis_id") != UNKNOWN_HYPOTHESIS_ID]
+    if not candidates or not targets:
+        return 0
+
+    scored = []
+    for target_index, target in enumerate(targets):
+        for candidate_index, candidate in enumerate(candidates):
+            score = _identity_similarity(
+                target.get("description", ""), candidate.get("description", "")
+            )
+            if score >= IDENTITY_MATCH_THRESHOLD:
+                scored.append((score, target_index, candidate_index))
+    scored.sort(key=lambda row: (-row[0], row[1], row[2]))
+
+    used_targets: set[int] = set()
+    used_candidates: set[int] = set()
+    inherited = 0
+    for score, target_index, candidate_index in scored:
+        if target_index in used_targets or candidate_index in used_candidates:
+            continue
+        target = targets[target_index]
+        candidate = candidates[candidate_index]
+        target["hypothesis_id"] = candidate["hypothesis_id"]
+        target["dominant_iterations"] = candidate.get("dominant_iterations", 0)
+        target["identity_inherited"] = True
+        target["identity_similarity"] = round(score, 4)
+        used_targets.add(target_index)
+        used_candidates.add(candidate_index)
+        inherited += 1
+    return inherited
+
+
 def _new_hypothesis_dict(desc: str, conf: float) -> dict:
     """Create a hypothesis dict with Phase 5.1 fields initialised."""
     return {
@@ -203,7 +281,11 @@ def _fallback_hypotheses() -> list[dict]:
     ]
 
 
-def make_generate_hypotheses(llm_factory: LLMFactory, unknown_enabled: bool = True):
+def make_generate_hypotheses(
+    llm_factory: LLMFactory,
+    unknown_enabled: bool = True,
+    stable_identity: bool = False,
+):
     """Create the generate_hypotheses node with an injected LLM factory.
 
     Args:
@@ -236,6 +318,9 @@ def make_generate_hypotheses(llm_factory: LLMFactory, unknown_enabled: bool = Tr
         except Exception as exc:
             logger.error("LLM invocation failed: %s, using fallback hypotheses", exc)
             hypotheses = _fallback_hypotheses()
+
+        if stable_identity:
+            _inherit_identity(hypotheses, existing)
 
         if not unknown_enabled:
             return {"hypotheses": [
